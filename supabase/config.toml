@@ -1,0 +1,30 @@
+project_id = "gxawhrkctjhneasimoek"
+
+# verify_jwt defaults to true, but it is pinned here so a future
+# `--no-verify-jwt` deploy cannot quietly remove the gateway check.
+#
+# Note that gateway verification alone is not sufficient: the project anon key
+# is itself a valid JWT. The check that actually separates a real user from
+# someone replaying the public key is auth.uid() inside consume_ai_quota(),
+# called by supabase/functions/_shared/auth.ts.
+
+[functions.analyze-learning-material]
+verify_jwt = true
+
+[functions.generate-themed-deck]
+verify_jwt = true
+
+[functions.evaluate-translation]
+verify_jwt = true
+
+[functions.pronunciation-feedback]
+verify_jwt = true
+
+[functions.synthesize-speech]
+verify_jwt = true
+
+[auth]
+# Required for the per-user quota: without a session every caller looks the
+# same. Anonymous sign-in keeps the app account-free while still giving each
+# device a distinct auth.uid().
+enable_anonymous_sign_ins = true

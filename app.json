@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "FirstCodexProject",
+    "name": "Language Learning",
     "slug": "FirstCodexProject",
-    "version": "1.0.0",
+    "version": "0.7.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -16,10 +16,39 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single",
+      "name": "Language Learning",
+      "shortName": "Learn",
+      "description": "Local-first language learning with AI flashcards, lessons, and speaking practice.",
+      "lang": "en",
+      "themeColor": "#1F5E59",
+      "backgroundColor": "#F6F5F1",
+      "display": "standalone",
+      "orientation": "any"
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow FirstCodexProject to record your pronunciation practice."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow FirstCodexProject to choose text photos for flashcards.",
+          "cameraPermission": "Allow FirstCodexProject to take text photos for flashcards.",
+          "microphonePermission": false
+        }
+      ]
+    ]
   }
 }

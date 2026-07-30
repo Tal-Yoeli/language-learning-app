@@ -31,7 +31,13 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
+**/.env
 .env*.local
+
+# local Expo run logs
+.expo-start*.log
+.expo-detach-test*.log
 
 # typescript
 *.tsbuildinfo
