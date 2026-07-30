@@ -24,6 +24,8 @@ export type Database = {
           native_language: string;
           learning_language: string;
           created_at: string;
+          approved: boolean;
+          approval_token: string;
         };
         Insert: {
           id: string;
@@ -31,11 +33,15 @@ export type Database = {
           native_language?: string;
           learning_language?: string;
           created_at?: string;
+          approved?: boolean;
+          approval_token?: string;
         };
         Update: {
           email?: string | null;
           native_language?: string;
           learning_language?: string;
+          approved?: boolean;
+          approval_token?: string;
         };
         Relationships: [];
       };
@@ -121,51 +127,96 @@ if (supabase && Platform.OS !== 'web') {
 }
 
 /**
- * The app has no sign-in screen and stores all learner data locally, but the
- * Edge Functions need to tell one caller from another so a per-device daily
- * quota can be enforced on paid OpenAI usage. Anonymous sign-in gives each
- * install (or browser profile) its own auth.uid() without asking for an
- * account, and the session persists in AsyncStorage / localStorage.
+ * Every person who wants to use the app must register with email + password
+ * and be individually approved before anything works — the app has no
+ * anonymous or local-only mode anymore. The library/progress data itself
+ * still lives entirely on-device (AsyncStorage / localStorage); accounts are
+ * purely an access gate, not a data store.
  */
-let anonymousSignIn: Promise<void> | null = null;
-let lastSignInError = '';
 
-export function getAuthBootstrapError() {
-  return lastSignInError;
+export type AuthResult = { error: string };
+
+export async function signUpWithPassword(
+  email: string,
+  password: string,
+): Promise<AuthResult> {
+  if (!supabase) return { error: 'Supabase is not configured.' };
+
+  const { error } = await supabase.auth.signUp({ email, password });
+
+  return { error: error?.message ?? '' };
 }
 
-export async function ensureSession() {
-  if (!supabase) return false;
+export async function signInWithPassword(
+  email: string,
+  password: string,
+): Promise<AuthResult> {
+  if (!supabase) return { error: 'Supabase is not configured.' };
 
-  const { data } = await supabase.auth.getSession();
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-  if (data.session) {
-    lastSignInError = '';
-    return true;
+  return { error: error?.message ?? '' };
+}
+
+export async function signOut(): Promise<void> {
+  await supabase?.auth.signOut();
+}
+
+export type ApprovalStatus = {
+  signedIn: boolean;
+  approved: boolean;
+  email: string;
+  /** Set when the status check itself failed, e.g. a network error. */
+  error: string;
+};
+
+/**
+ * Relies on the existing `profiles_select_own` RLS policy (auth.uid() = id),
+ * so a signed-in user can always read their own approval flag and nothing
+ * else's.
+ */
+export async function fetchApprovalStatus(): Promise<ApprovalStatus> {
+  if (!supabase) {
+    return { signedIn: false, approved: false, email: '', error: '' };
   }
 
-  if (!anonymousSignIn) {
-    anonymousSignIn = (async () => {
-      const { error } = await supabase.auth.signInAnonymously();
+  const { data: sessionData } = await supabase.auth.getSession();
+  const user = sessionData.session?.user;
 
-      if (error) {
-        // Anonymous sign-ins are off by default in a Supabase project. Record
-        // the reason so the AI error message can point at the actual fix
-        // instead of a bare 401.
-        lastSignInError = error.message;
-        throw error;
-      }
-
-      lastSignInError = '';
-    })().finally(() => {
-      anonymousSignIn = null;
-    });
+  if (!user) {
+    return { signedIn: false, approved: false, email: '', error: '' };
   }
 
-  try {
-    await anonymousSignIn;
-    return true;
-  } catch {
-    return false;
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('approved')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      signedIn: true,
+      approved: false,
+      email: user.email ?? '',
+      error: error.message,
+    };
   }
+
+  return {
+    signedIn: true,
+    // The signup trigger inserts the profiles row in the same transaction as
+    // auth.users, but a `null` row (not yet visible/replicated) is treated as
+    // not-yet-approved rather than a crash.
+    approved: Boolean(data?.approved),
+    email: user.email ?? '',
+    error: '',
+  };
+}
+
+export function subscribeToAuthState(onChange: () => void) {
+  if (!supabase) return () => {};
+
+  const { data } = supabase.auth.onAuthStateChange(() => onChange());
+
+  return () => data.subscription.unsubscribe();
 }

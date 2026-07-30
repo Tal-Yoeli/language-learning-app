@@ -1,6 +1,6 @@
 {
   "name": "firstcodexproject",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",

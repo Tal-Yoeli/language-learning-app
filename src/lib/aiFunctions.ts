@@ -1,4 +1,4 @@
-import { ensureSession, getAuthBootstrapError, supabase } from './supabase';
+import { supabase } from './supabase';
 
 const DEFAULT_FUNCTION_TIMEOUT_MS = 60_000;
 
@@ -46,32 +46,22 @@ async function getFunctionErrorMessage(error: unknown) {
     return fallback;
   }
 
-  const status = (context as { status?: unknown }).status;
-  // A 401 almost always means anonymous sign-in never succeeded, so say what to
-  // fix rather than surfacing a bare "sign-in required".
-  const authHint =
-    status === 401
-      ? ` Anonymous sign-in did not complete${
-          getAuthBootstrapError() ? `: ${getAuthBootstrapError()}` : ''
-        }. Enable Anonymous sign-ins in the Supabase dashboard under Authentication → Providers.`
-      : '';
-
   try {
     const body = (await (context as { json: () => Promise<unknown> }).json()) as
       | { error?: unknown; message?: unknown }
       | null;
 
     if (typeof body?.error === 'string' && body.error.trim()) {
-      return `${body.error}${authHint}`;
+      return body.error;
     }
     if (typeof body?.message === 'string' && body.message.trim()) {
-      return `${body.message}${authHint}`;
+      return body.message;
     }
   } catch {
     // Some network failures do not include a readable response body.
   }
 
-  return `${fallback}${authHint}`;
+  return fallback;
 }
 
 async function invokeFunction<T>(
@@ -83,12 +73,6 @@ async function invokeFunction<T>(
   if (!supabase) {
     throw new Error('Supabase is not configured.');
   }
-
-  // Attach a per-device anonymous session so the Edge Function can apply its
-  // daily quota. A failure here is not fatal: the request still goes out and
-  // the server decides, which keeps this client working against Edge Functions
-  // deployed before the quota guard existed.
-  await ensureSession();
 
   const { data, error } = await withTimeout(
     supabase.functions.invoke<T>(name, { body }),

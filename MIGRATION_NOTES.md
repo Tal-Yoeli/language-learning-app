@@ -165,6 +165,46 @@ is stored server-side.
    production builds for both platforms. Component and end-to-end tests would be
    the next meaningful addition.
 
+## Addendum (2026-07-30): admin-approved accounts
+
+The local-first/anonymous model above was superseded shortly after this
+document was written. The app now requires a signed-in, individually-approved
+account on **both** platforms before anything is usable — including the local
+flashcard library. This was an explicit, deliberate reversal of point 8 in
+"Known limitations" above (`supabase/schema.sql` staying unused): `profiles`
+is now actively read and written by a new `handle_new_user` trigger.
+
+What stayed the same: flashcards/progress are still 100% local per device —
+accounts are purely an access gate, not a data store, so none of the local-vs-
+cloud tradeoffs above changed.
+
+What's new:
+- `supabase/migrations/20260730000000_user_approval.sql` — adds
+  `profiles.approved` / `profiles.approval_token`, a trigger that creates a
+  profile row the instant someone signs up, and extends `consume_ai_quota()`
+  to reject unapproved callers server-side (not just hidden client-side).
+- `supabase/functions/notify-signup` and `approve-user` — a `pg_net`-based
+  database trigger (`supabase/migrations/20260730010000_notify_signup_trigger.sql`)
+  calls `notify-signup` directly on every `profiles` insert, which emails
+  `tal.yoeli@gmail.com` via Resend with a review link. No dashboard
+  configuration is needed for this — a Supabase Database Webhook would do the
+  same thing, but its UI location moves between Supabase versions, so calling
+  the function straight from a trigger is more reliable. That link's `GET`
+  only renders a confirmation page; the page's own button `POST`s the actual
+  approval. This split matters because some corporate email scanners (e.g.
+  Outlook Safe Links) silently pre-fetch every link in an email via `GET` — if
+  `GET` itself approved the account, such a scanner would silently approve
+  strangers.
+- `src/auth/AuthGate.tsx` wraps `AppV5` from the outside — `AppV5.tsx` itself
+  was not touched. It renders sign-in/sign-up, "waiting for approval", or the
+  app, based on session + `profiles.approved`.
+- Anonymous sign-in (added for the AI quota in the previous stage) is now
+  disabled; real accounts serve that purpose instead.
+
+Consequence: local development and your own iPhone testing now also require
+signing up and being approved — there's no built-in bypass, since the entire
+point is that nobody gets in without approval.
+
 ## Remaining improvements worth considering
 
 - Playwright or similar for the major user journeys in a real browser.

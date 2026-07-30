@@ -69,8 +69,18 @@ export async function consumeAiQuota(request: Request): Promise<QuotaResult> {
   if (!response.ok) {
     const body = await response.text();
 
+    // 28001 is the errcode consume_ai_quota() raises for a signed-in user
+    // whose profiles.approved is still false — distinct from "not signed in
+    // at all" so the client can show the right message.
+    if (body.includes('28001') || body.includes('pending approval')) {
+      throw new RequestRejected(
+        "Your account has not been approved yet. You'll be able to use AI features once it is.",
+        403,
+      );
+    }
+
     // 28000 is the errcode consume_ai_quota() raises for a null auth.uid(),
-    // which is what the public anon key produces.
+    // which is what an unauthenticated caller produces.
     if (
       response.status === 401 ||
       response.status === 403 ||

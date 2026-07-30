@@ -1,8 +1,29 @@
-# Language Learning App v0.7.0
+# Language Learning App v0.8.0
 
-A local-first language-learning app built with React Native, Expo, and
-TypeScript. It runs on iPhone through Expo Go **and** as a responsive website on
-desktop, laptop, tablet, and mobile browsers, from a single codebase.
+A language-learning app built with React Native, Expo, and TypeScript. It runs
+on iPhone through Expo Go **and** as a responsive website on desktop, laptop,
+tablet, and mobile browsers, from a single codebase. Flashcards and progress
+are stored locally on each device; access to the app itself requires a
+signed-in account that an admin approves.
+
+## Version 0.8.0
+
+### Admin-approved accounts
+
+- Every user — on the website and the iPhone app — must sign up with email and
+  password, and is blocked at a "waiting for approval" screen until approved.
+- A new signup emails `tal.yoeli@gmail.com` with a one-click **Approve** link
+  (via a database trigger + a Resend-powered Edge Function).
+- Approval is enforced **server-side** in every AI Edge Function, not just
+  hidden in the UI — an unapproved account's own valid session still gets a
+  403 if called directly.
+- Flashcards/progress remain entirely local per device; accounts do not sync
+  or store the library — they are purely a gate on who may use the app.
+- Anonymous sign-in (introduced in 0.7.0 purely to meter AI usage per device)
+  is retired now that real accounts serve that purpose.
+
+See `DEPLOYMENT.md` §1 for the one-time setup (Resend account, migration,
+database webhook) and `MIGRATION_NOTES.md`'s addendum for the full design.
 
 ## Version 0.7.0
 
@@ -209,7 +230,8 @@ EXPO_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 EXPO_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
 ```
 
-Keep `OPENAI_API_KEY` only in Supabase Edge Function secrets.
+Keep `OPENAI_API_KEY` and `RESEND_API_KEY` only in Supabase Edge Function
+secrets.
 
 Deploy all required functions:
 
@@ -219,18 +241,25 @@ supabase functions deploy pronunciation-feedback
 supabase functions deploy synthesize-speech
 supabase functions deploy generate-themed-deck
 supabase functions deploy evaluate-translation
+supabase functions deploy notify-signup
+supabase functions deploy approve-user
 ```
 
-Redeploy all five functions after changing files under
-`supabase/functions/_shared`, because each deployed function bundles its own
-copy of shared code.
+Redeploy every function after changing files under `supabase/functions/_shared`,
+because each deployed function bundles its own copy of shared code.
 
 If Supabase CLI reports that the project status is `INACTIVE`, open the
 Supabase dashboard and resume the project before deploying functions.
 
-The AI features additionally require **Anonymous sign-ins** to be enabled in the
-Supabase dashboard, and the quota migration in `supabase/migrations/` to be
-applied. Both are one-time steps; `DEPLOYMENT.md` has the exact instructions.
+The app additionally requires: the migrations in `supabase/migrations/` to be
+applied (one of them wires a database trigger that calls `notify-signup` on
+every new signup — no dashboard webhook configuration needed), a Resend
+account for that function to send email through, and **Anonymous sign-ins**
+to be **disabled** (real accounts replace it). These are one-time steps;
+`DEPLOYMENT.md` §1 has the exact instructions in order.
+
+Every account — yours included — must be signed up and approved before the app
+is usable. See `DEPLOYMENT.md` for how approval works.
 
 ## Verification
 

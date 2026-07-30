@@ -23,8 +23,18 @@ verify_jwt = true
 [functions.synthesize-speech]
 verify_jwt = true
 
+# Called only by the Database Webhook on profiles INSERT (configured in the
+# dashboard); Supabase signs that call itself.
+[functions.notify-signup]
+verify_jwt = true
+
+# Reached by a plain browser click on the link in the notification email, so
+# there is no Authorization header to verify. This function authorizes
+# itself with the service-role key instead — see its source for why.
+[functions.approve-user]
+verify_jwt = false
+
 [auth]
-# Required for the per-user quota: without a session every caller looks the
-# same. Anonymous sign-in keeps the app account-free while still giving each
-# device a distinct auth.uid().
-enable_anonymous_sign_ins = true
+# Real accounts now gate access, so the anonymous fallback used only to give
+# each device a distinct auth.uid() for the quota is no longer needed.
+enable_anonymous_sign_ins = false
