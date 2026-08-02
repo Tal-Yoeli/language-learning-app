@@ -20,9 +20,25 @@ import {
   type ApprovalStatus,
 } from '../lib/supabase';
 import { isSupabaseConfigured } from '../lib/supabaseConfig';
+import AdminApproval from './AdminApproval';
 
 type GateState = 'loading' | 'signedOut' | 'pendingApproval' | 'approved';
 type Mode = 'signIn' | 'signUp';
+
+/**
+ * The signup notification email links here as `/?approve=<token>`. Read once
+ * at module load so the value survives the state updates below; web only,
+ * since the link is always opened in a browser.
+ */
+function readApprovalTokenFromUrl() {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return '';
+
+  try {
+    return new URLSearchParams(window.location.search).get('approve') ?? '';
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Every screen in the app — including the fully-local flashcard library —
@@ -39,6 +55,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState('');
   const [checkingApproval, setCheckingApproval] = useState(false);
+  const [approvalToken, setApprovalToken] = useState(readApprovalTokenFromUrl);
 
   async function refreshStatus() {
     const result = await fetchApprovalStatus();
@@ -124,6 +141,24 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     setConfirmPassword('');
     setNotice('');
     setGateState('signedOut');
+  }
+
+  // Handled before the sign-in gate: the emailed token is its own credential,
+  // so approving does not require being signed in.
+  if (approvalToken) {
+    return (
+      <AdminApproval
+        onDismiss={() => {
+          setApprovalToken('');
+          // Drop ?approve= from the address bar so a refresh does not reopen
+          // this screen with a token that has already been rotated.
+          if (Platform.OS === 'web' && typeof window !== 'undefined') {
+            window.history.replaceState({}, '', window.location.pathname);
+          }
+        }}
+        token={approvalToken}
+      />
+    );
   }
 
   if (!isSupabaseConfigured) {

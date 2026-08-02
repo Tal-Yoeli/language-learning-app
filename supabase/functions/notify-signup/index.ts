@@ -66,7 +66,14 @@ Deno.serve(async (request) => {
       return jsonResponse({ error: 'Missing email or approval_token.' }, 400);
     }
 
-    const approveUrl = `${supabaseUrl}/functions/v1/approve-user?token=${encodeURIComponent(token)}`;
+    // Points at the web app, not the Edge Function: Supabase's Edge Runtime
+    // forces `Content-Type: text/plain` on every function response, so a
+    // function cannot serve a clickable approval page. The app (on Netlify)
+    // reads `?approve=<token>` and renders the real confirm screen.
+    const siteUrl = Deno.env.get('SITE_URL')?.replace(/\/+$/, '');
+    const approveUrl = siteUrl
+      ? `${siteUrl}/?approve=${encodeURIComponent(token)}`
+      : `${supabaseUrl}/functions/v1/approve-user?token=${encodeURIComponent(token)}`;
     const safeEmail = escapeHtml(email);
 
     const response = await fetch(RESEND_URL, {
