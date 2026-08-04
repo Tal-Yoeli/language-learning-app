@@ -13,6 +13,8 @@ type RequestBody = {
   text?: string;
   imageBase64?: string;
   imageMimeType?: string;
+  pdfBase64?: string;
+  pdfFileName?: string;
   maxCards?: number;
 };
 
@@ -41,9 +43,14 @@ Deno.serve(async (request) => {
     const body = (await request.json()) as RequestBody;
     const hasText = Boolean(body.text?.trim());
     const hasImage = Boolean(body.imageBase64 && body.imageMimeType);
+    const hasPdf = Boolean(body.pdfBase64);
 
-    if (!hasText && !hasImage) {
-      return jsonResponse({ error: 'Text or image is required.' }, 400, request);
+    if (!hasText && !hasImage && !hasPdf) {
+      return jsonResponse(
+        { error: 'Text, an image, or a PDF is required.' },
+        400,
+        request,
+      );
     }
 
     const maxCards = Math.max(1, Math.min(body.maxCards ?? 12, 25));
@@ -51,12 +58,15 @@ Deno.serve(async (request) => {
       body.mode === 'pairs'
         ? 'The material is expected to contain word-translation pairs such as "word - translation". Extract every clear pair.'
         : 'The material is free text. Choose the most useful vocabulary items for a learner. If the text describes a deck goal or topic, generate practical vocabulary for that goal.';
+    const sourceNote = hasPdf
+      ? '\nThe attached PDF is the main source. Read the whole document, including text rendered inside page images, and ignore page furniture such as headers, footers, and page numbers.'
+      : '';
 
     const content: Array<Record<string, unknown>> = [
       {
         type: 'input_text',
         text:
-          `${userInstruction}\n` +
+          `${userInstruction}${sourceNote}\n` +
           `Native language: ${body.nativeLanguage}.\n` +
           `Learning language: ${body.learningLanguage}.\n` +
           `Return up to ${maxCards} cards.\n` +
@@ -70,6 +80,16 @@ Deno.serve(async (request) => {
       content.push({
         type: 'input_image',
         image_url: `data:${body.imageMimeType};base64,${body.imageBase64}`,
+      });
+    }
+
+    if (hasPdf) {
+      // The Responses API expects a data URL rather than bare base64, and a
+      // filename it can use to pick a parser.
+      content.push({
+        type: 'input_file',
+        filename: body.pdfFileName?.trim() || 'document.pdf',
+        file_data: `data:application/pdf;base64,${body.pdfBase64}`,
       });
     }
 

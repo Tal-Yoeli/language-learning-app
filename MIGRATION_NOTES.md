@@ -137,10 +137,9 @@ is stored server-side.
 
 ## Known limitations
 
-1. **Web and phone libraries are separate.** Browser `localStorage` is a
-   different store from the phone's AsyncStorage. Move a library across with
-   *Download backup* → *Load backup file*. This was your explicit choice over
-   building cross-device sync.
+1. ~~**Web and phone libraries are separate.**~~ **Superseded 2026-08-03** —
+   cross-device sync was added; see the addendum below. Local storage is still
+   the working copy, so the app keeps functioning offline.
 2. **`localStorage` holds roughly 5 MB** and is not encrypted. A very large
    library could hit the ceiling, and anyone with access to the same browser
    profile can read the cards. Card content is not sensitive, but a shared
@@ -205,13 +204,60 @@ Consequence: local development and your own iPhone testing now also require
 signing up and being approved — there's no built-in bypass, since the entire
 point is that nobody gets in without approval.
 
+## Addendum (2026-08-03): cross-device sync and PDF import
+
+### Cross-device sync
+
+The library and activity documents now follow the account instead of the
+device, reversing limitation 1 above. They are stored as `jsonb` in a new
+`user_state` table (`supabase/migrations/20260803000000_user_state_sync.sql`),
+in exactly the shape the app already uses. They were deliberately **not**
+normalised into `schema.sql`'s unused flat `flashcards` / `card_reviews`
+tables: those have a different shape and no spaced-repetition fields, so
+remapping would have meant rewriting the persistence layer inside a
+4,100-line component for no practical gain at this scale.
+
+Local storage remains the working copy — the existing AsyncStorage writes are
+untouched — so the app still works offline. `src/lib/useCloudSync.ts` pulls on
+launch and on foreground, and pushes a debounced copy ~2s after a change, only
+for the document that actually changed.
+
+Resolution rules live in `src/lib/syncDecision.ts` (pure, unit tested in
+`tests/cloudSync.test.mts`). The subtle case is a device whose demo content was
+seeded *just now* signing into an account whose real library was saved days
+ago: comparing timestamps alone would overwrite real cards with demo ones, so a
+never-synced device holding only pristine demo content always yields to the
+account.
+
+**Accepted limitation:** resolution is per-document last-write-wins. Two
+devices editing the same account at genuinely the same moment will lose the
+earlier push. The common case — one device stale for days — is correct, because
+the pull always precedes any push. Row-level merge with per-card timestamps is
+the natural next step if this ever bites.
+
+When a device with real cards first meets an account with different real cards,
+`src/ui/SyncChoiceDialog.tsx` asks which to keep rather than silently
+discarding one. That dialog is the reason turning sync on cannot quietly
+destroy an existing library.
+
+### PDF import
+
+The AI card creator accepts PDFs alongside text and photos, via
+`expo-document-picker` (`src/platform/documentPicker.ts` / `.web.ts`). The PDF
+is forwarded to OpenAI as an `input_file` data URL rather than having its text
+extracted client-side — far less code, and it handles scanned/image-only PDFs
+that text extraction cannot read.
+
+Capped at 6 MB, matching the existing photo cap. OpenAI itself allows 50 MB,
+but the binding constraint is the Supabase Edge Function request body, which is
+undocumented; 6 MB is the size the photo path has already proven in production.
+
 ## Remaining improvements worth considering
 
 - Playwright or similar for the major user journeys in a real browser.
-- Break `src/AppV5.tsx` into per-screen modules; it is now ~4,150 lines.
+- Break `src/AppV5.tsx` into per-screen modules; it is now ~4,200 lines.
 - Runtime schema validation for restored backups (already flagged in
   `AUDIT_AND_ROADMAP.md`).
 - Expo SDK 56 upgrade as an isolated task, with this web build as the regression
   baseline.
-- A "last backup taken" indicator, now that browser storage is the only copy for
-  web users.
+- Per-card timestamps so sync can merge row-by-row instead of per document.

@@ -15,6 +15,7 @@ import Camera from 'lucide-react-native/icons/camera';
 import Check from 'lucide-react-native/icons/check';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
+import FileText from 'lucide-react-native/icons/file-text';
 import Flame from 'lucide-react-native/icons/flame';
 import ImageIcon from 'lucide-react-native/icons/image';
 import Library from 'lucide-react-native/icons/library';
@@ -50,6 +51,7 @@ import {
   pickBackupFile,
   supportsBackupFilePicker,
 } from './platform/backup';
+import { pdfPickerLabel, pickPdf } from './platform/documentPicker';
 import {
   cameraActionLabel,
   readAssetBase64,
@@ -67,8 +69,10 @@ import {
   isSpeechCacheAvailable,
   speechCacheUnavailableMessage,
 } from './platform/speechCache';
+import { useCloudSync } from './lib/useCloudSync';
 import AppShell, { type NavItem } from './ui/AppShell';
 import ConfirmDialog, { type ConfirmRequest } from './ui/ConfirmDialog';
+import SyncChoiceDialog from './ui/SyncChoiceDialog';
 import { columnStyle, useResponsiveLayout } from './ui/useResponsiveLayout';
 import {
   analyzeLearningMaterial,
@@ -166,6 +170,9 @@ const V2_LIBRARY_STORAGE_KEY = 'language-learning/library/v2';
 const OLD_CARDS_STORAGE_KEY = 'language-learning/cards/v1';
 const OLD_SETTINGS_STORAGE_KEY = 'language-learning/settings/v1';
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+// Matches the image cap: the practical ceiling is the Edge Function request
+// body, not OpenAI's own 50 MB file limit.
+const MAX_PDF_BYTES = 6 * 1024 * 1024;
 const MAX_RECORDING_BYTES = 5 * 1024 * 1024;
 const MAX_RECORDING_DURATION_MS = 30_000;
 
@@ -366,6 +373,34 @@ function normalizeLibrary(value: LibraryState): LibraryState {
     selectedDeckId: selectedDeck.id,
   };
 }
+
+/**
+ * Coerces a stored or synced activity record into a valid ActivityState.
+ * Shared by the local load path and by cloud sync, so a document arriving from
+ * another device gets exactly the same validation as one read off disk.
+ */
+function hydrateActivity(value: unknown, today: string): ActivityState | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const parsed = value as Partial<ActivityState>;
+  const initial = createInitialActivity(today);
+
+  return {
+    ...initial,
+    totalXp: Math.max(0, Number(parsed.totalXp) || 0),
+    todayXp: Math.max(0, Number(parsed.todayXp) || 0),
+    streakDays: Math.max(0, Number(parsed.streakDays) || 0),
+    lastActiveDate:
+      typeof parsed.lastActiveDate === 'string' ? parsed.lastActiveDate : '',
+    todayDate: typeof parsed.todayDate === 'string' ? parsed.todayDate : today,
+    todayProgress: Math.max(0, Number(parsed.todayProgress) || 0),
+    lessonsCompleted: Math.max(0, Number(parsed.lessonsCompleted) || 0),
+    perfectLessons: Math.max(0, Number(parsed.perfectLessons) || 0),
+  };
+}
+
+/** Serialised demo library, used to tell untouched devices from real ones. */
+const PRISTINE_LIBRARY_JSON = JSON.stringify(initialLibrary);
 
 export default function AppV5() {
   const layout = useResponsiveLayout();
@@ -575,6 +610,29 @@ export default function AppV5() {
     );
   }, [activity, activityReady]);
 
+  // Mirrors the library and activity documents to the signed-in account so the
+  // same data appears on every device. Local storage above stays the source of
+  // truth during a session, so the app still works offline.
+  const { syncChoice } = useCloudSync<LibraryState, ActivityState>({
+    library,
+    activity,
+    ready: storageReady && activityReady,
+    libraryIsPristine: JSON.stringify(library) === PRISTINE_LIBRARY_JSON,
+    activityIsPristine:
+      activity.totalXp === 0 && activity.lessonsCompleted === 0,
+    applyLibrary: setLibrary,
+    applyActivity: setActivity,
+    normalizeLibrary: (value) => {
+      try {
+        return value ? normalizeLibrary(value as LibraryState) : null;
+      } catch {
+        return null;
+      }
+    },
+    normalizeActivity: (value) => hydrateActivity(value, getLocalDateKey()),
+    onNotice: setNotice,
+  });
+
   useEffect(() => {
     if (!activityReady) return;
 
@@ -735,23 +793,9 @@ export default function AppV5() {
       const storedActivity = await AsyncStorage.getItem(ACTIVITY_STORAGE_KEY);
       if (!storedActivity) return;
 
-      const parsed = JSON.parse(storedActivity) as Partial<ActivityState>;
-      const initial = createInitialActivity(today);
-      const hydratedActivity: ActivityState = {
-        ...initial,
-        totalXp: Math.max(0, Number(parsed.totalXp) || 0),
-        todayXp: Math.max(0, Number(parsed.todayXp) || 0),
-        streakDays: Math.max(0, Number(parsed.streakDays) || 0),
-        lastActiveDate:
-          typeof parsed.lastActiveDate === 'string'
-            ? parsed.lastActiveDate
-            : '',
-        todayDate:
-          typeof parsed.todayDate === 'string' ? parsed.todayDate : today,
-        todayProgress: Math.max(0, Number(parsed.todayProgress) || 0),
-        lessonsCompleted: Math.max(0, Number(parsed.lessonsCompleted) || 0),
-        perfectLessons: Math.max(0, Number(parsed.perfectLessons) || 0),
-      };
+      const hydratedActivity =
+        hydrateActivity(JSON.parse(storedActivity), today) ??
+        createInitialActivity(today);
       setActivity(rollActivityToDate(hydratedActivity, today));
     } catch {
       setActivity(createInitialActivity(today));
@@ -1570,6 +1614,48 @@ export default function AppV5() {
         error instanceof Error
           ? `Image analysis error: ${error.message}`
           : 'Image analysis error.',
+      );
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function choosePdf() {
+    if (!supabase || !selectedLanguage || !selectedDeck) {
+      setNotice('Select a destination deck and configure Supabase first.');
+      return;
+    }
+
+    try {
+      const picked = await pickPdf();
+      if (!picked) return;
+
+      if (estimateBase64Bytes(picked.base64) > MAX_PDF_BYTES) {
+        setNotice(
+          'This PDF is too large to analyze. Split it into smaller files, or export just the pages you need.',
+        );
+        return;
+      }
+
+      setAiLoading(true);
+      setSelectedImageLabel(picked.fileName);
+
+      previewGeneratedCards(
+        await analyzeLearningMaterial({
+          mode: aiMode,
+          nativeLanguage: library.motherTongue,
+          learningLanguage: selectedLanguage.name,
+          text: sourceText,
+          pdfBase64: picked.base64,
+          pdfFileName: picked.fileName,
+          maxCards: 12,
+        }),
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? `PDF analysis error: ${error.message}`
+          : 'PDF analysis error.',
       );
     } finally {
       setAiLoading(false);
@@ -3022,6 +3108,12 @@ export default function AppV5() {
               />
             ) : null}
           </View>
+          <ActionButton
+            disabled={aiLoading || !canUseAi}
+            icon={FileText}
+            label={pdfPickerLabel}
+            onPress={() => void choosePdf()}
+          />
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ disabled: aiLoading || !canUseAi }}
@@ -3267,6 +3359,7 @@ export default function AppV5() {
         onCancel={() => setConfirmRequest(null)}
         request={confirmRequest}
       />
+      <SyncChoiceDialog request={syncChoice} />
     </KeyboardAvoidingView>
   );
 }

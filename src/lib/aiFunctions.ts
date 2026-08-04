@@ -123,6 +123,9 @@ export async function analyzeLearningMaterial(body: {
   text?: string;
   imageBase64?: string;
   imageMimeType?: string;
+  /** Raw base64 of a PDF; the Edge Function wraps it as an OpenAI input_file. */
+  pdfBase64?: string;
+  pdfFileName?: string;
   maxCards?: number;
 }) {
   const data = await invokeFunction<{

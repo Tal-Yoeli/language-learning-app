@@ -43,8 +43,10 @@ value itself is never shown back).
 3. Paste and run `supabase/migrations/20260730000000_user_approval.sql`.
 4. Paste and run `supabase/migrations/20260730010000_notify_signup_trigger.sql`
    — this is what sends you the "new signup" email; see step 1.5 below.
+5. Paste and run `supabase/migrations/20260803000000_user_state_sync.sql`
+   — this is what makes decks and progress follow the account across devices.
    (Or run `npx supabase db push --project-ref gxawhrkctjhneasimoek` once for
-   all three, if you prefer the CLI.)
+   all of them, if you prefer the CLI.)
 
 Expected result: `Success. No rows returned` for each.
 Verify: **Table Editor** shows `profiles` with an `approved` column

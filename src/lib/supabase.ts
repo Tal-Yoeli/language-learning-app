@@ -72,6 +72,32 @@ export type Database = {
         };
         Relationships: [];
       };
+      user_state: {
+        Row: {
+          user_id: string;
+          library: unknown | null;
+          activity: unknown | null;
+          library_updated_at: string | null;
+          activity_updated_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          library?: unknown | null;
+          activity?: unknown | null;
+          library_updated_at?: string | null;
+          activity_updated_at?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          library?: unknown | null;
+          activity?: unknown | null;
+          library_updated_at?: string | null;
+          activity_updated_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       card_reviews: {
         Row: {
           id: string;

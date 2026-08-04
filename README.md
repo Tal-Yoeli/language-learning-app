@@ -1,10 +1,31 @@
-# Language Learning App v0.8.0
+# Language Learning App v0.9.0
 
 A language-learning app built with React Native, Expo, and TypeScript. It runs
 on iPhone through Expo Go **and** as a responsive website on desktop, laptop,
 tablet, and mobile browsers, from a single codebase. Flashcards and progress
 are stored locally on each device; access to the app itself requires a
 signed-in account that an admin approves.
+
+## Version 0.9.0
+
+### Your library follows your account
+
+- Decks, cards, progress, XP and streaks now sync across every device signed
+  into the same account, instead of living only on the device that made them.
+- Local storage is still the working copy, so the app keeps working offline;
+  changes upload a couple of seconds after you make them and download when the
+  app or tab comes back to the foreground.
+- The first time a device with its own cards signs into an account that already
+  has different cards, the app asks which library to keep rather than silently
+  overwriting one.
+
+### PDFs in the AI card creator
+
+- Alongside pasted text and photos, the AI section accepts a PDF and generates
+  cards from it.
+- The PDF goes to OpenAI intact, so scanned documents and pages where the text
+  is part of an image work as well as ordinary text PDFs.
+- Capped at 6 MB, matching the existing photo limit.
 
 ## Version 0.8.0
 
