@@ -169,6 +169,8 @@ const V3_LIBRARY_STORAGE_KEY = 'language-learning/library/v3';
 const V2_LIBRARY_STORAGE_KEY = 'language-learning/library/v2';
 const OLD_CARDS_STORAGE_KEY = 'language-learning/cards/v1';
 const OLD_SETTINGS_STORAGE_KEY = 'language-learning/settings/v1';
+// The Edge Functions clamp to this same ceiling, so raising it here is enough.
+const MAX_AI_CARDS_PER_REQUEST = 25;
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 // Matches the image cap: the practical ceiling is the Edge Function request
 // body, not OpenAI's own 50 MB file limit.
@@ -1231,7 +1233,7 @@ export default function AppV5() {
         nativeLanguage: library.motherTongue,
         learningLanguage: selectedLanguage.name,
         minCards: 10,
-        maxCards: 12,
+        maxCards: MAX_AI_CARDS_PER_REQUEST,
       });
       const cardsToAdd: Flashcard[] = generatedDeck.cards.map((card) => ({
         id: createId('ai-deck'),
@@ -1563,7 +1565,7 @@ export default function AppV5() {
           nativeLanguage: library.motherTongue,
           learningLanguage: selectedLanguage.name,
           text: sourceText,
-          maxCards: 12,
+          maxCards: MAX_AI_CARDS_PER_REQUEST,
         }),
       );
     } catch (error) {
@@ -1606,7 +1608,7 @@ export default function AppV5() {
           text: sourceText,
           imageBase64,
           imageMimeType: asset.mimeType ?? 'image/jpeg',
-          maxCards: 12,
+          maxCards: MAX_AI_CARDS_PER_REQUEST,
         }),
       );
     } catch (error) {
@@ -1648,7 +1650,7 @@ export default function AppV5() {
           text: sourceText,
           pdfBase64: picked.base64,
           pdfFileName: picked.fileName,
-          maxCards: 12,
+          maxCards: MAX_AI_CARDS_PER_REQUEST,
         }),
       );
     } catch (error) {
