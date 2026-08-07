@@ -444,7 +444,14 @@ export default function AppV5() {
   const [showAiDestination, setShowAiDestination] = useState(false);
   const [aiWorkspace, setAiWorkspace] = useState<'cards' | 'speaking'>('cards');
   const [cardIndex, setCardIndex] = useState(0);
-  const [practiceQueue, setPracticeQueue] = useState<string[]>([]);
+  // Tagged with the deck it belongs to, so a deck change invalidates it
+  // declaratively. An effect that cleared the queue separately would race the
+  // effect that builds it: both run in the same commit, the clear would win,
+  // and the builder's dependencies would not change again to retry.
+  const [practice, setPractice] = useState<{ deckId: string; ids: string[] }>({
+    deckId: '',
+    ids: [],
+  });
   const [showTranslation, setShowTranslation] = useState(false);
   const [newLanguageName, setNewLanguageName] = useState('');
   const [newDeckName, setNewDeckName] = useState('');
@@ -547,10 +554,12 @@ export default function AppV5() {
   // every render.
   const reviewCards = useMemo(
     () =>
-      practiceQueue
-        .map((id) => cards.find((card) => card.id === id))
-        .filter((card): card is Flashcard => Boolean(card)),
-    [practiceQueue, cards],
+      practice.deckId && practice.deckId === selectedDeck?.id
+        ? practice.ids
+            .map((id) => cards.find((card) => card.id === id))
+            .filter((card): card is Flashcard => Boolean(card))
+        : [],
+    [practice, selectedDeck?.id, cards],
   );
   const activeCard = reviewCards[cardIndex] ?? null;
   const canUseAi = Boolean(supabase);
@@ -692,23 +701,27 @@ export default function AppV5() {
 
   // Builds the next practice round whenever there isn't a usable one: on first
   // load, after a deck change, and when the previous round runs out. This is
-  // what makes practice unlimited — the queue simply refills.
+  // what makes practice unlimited — the queue simply refills. It is the only
+  // writer of `practice`, which is what keeps it free of effect-ordering races.
   useEffect(() => {
-    if (!storageReady || !cards.length || reviewCards.length) return;
+    const deckId = selectedDeck?.id;
 
-    setPracticeQueue(
-      buildPracticeQueue(cards, {
+    if (!storageReady || !deckId || !cards.length) return;
+    if (practice.deckId === deckId && reviewCards.length) return;
+
+    setPractice({
+      deckId,
+      ids: buildPracticeQueue(cards, {
         length: Math.max(cards.length, 12),
       }).map((card) => card.id),
-    );
+    });
     setCardIndex(0);
-  }, [storageReady, cards, reviewCards.length]);
+  }, [storageReady, selectedDeck?.id, cards, practice.deckId, reviewCards.length]);
 
   useEffect(() => {
     lessonEvaluationIdRef.current += 1;
     setLessonChecking(false);
     setCardIndex(0);
-    setPracticeQueue([]);
     setShowTranslation(false);
     setPronunciationFeedback(null);
     setSpokenTranscript('');
@@ -1482,11 +1495,11 @@ export default function AppV5() {
     }));
     setShowTranslation(false);
 
-    // Emptying the queue makes the effect above build a fresh round, so
-    // practice continues instead of stopping at the end of the deck.
+    // Emptying the round makes the effect above build a fresh one, so practice
+    // continues instead of stopping at the end of the deck.
     const nextIndex = cardIndex + 1;
     if (nextIndex >= reviewCards.length) {
-      setPracticeQueue([]);
+      setPractice((current) => ({ ...current, ids: [] }));
       setCardIndex(0);
     } else {
       setCardIndex(nextIndex);
