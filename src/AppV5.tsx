@@ -85,8 +85,12 @@ import {
 } from './lib/aiFunctions';
 import {
   applyReviewResult,
+  buildPracticeQueue,
+  cardStrength,
+  isDue,
   isLocallyAcceptableAnswer,
   summarizeLessonOutcomes,
+  type CardStrength,
 } from './lib/learning';
 import {
   applyActivityEvent,
@@ -137,6 +141,8 @@ type Flashcard = {
   exampleTranslation: string;
   known: number;
   missed: number;
+  /** Consecutive correct answers; drives how often the card comes back. */
+  streak: number;
   intervalDays: number;
   nextReviewAt: string;
 };
@@ -204,6 +210,7 @@ const arabicCards: Flashcard[] = [
       '\u05e9\u05dc\u05d5\u05dd, \u05d0\u05d9\u05da \u05d0\u05ea\u05d4 \u05d4\u05d9\u05d5\u05dd?',
     known: 0,
     missed: 0,
+    streak: 0,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -216,6 +223,7 @@ const arabicCards: Flashcard[] = [
       '\u05d0\u05e0\u05d9 \u05e8\u05d5\u05e6\u05d4 \u05de\u05d9\u05dd, \u05d1\u05d1\u05e7\u05e9\u05d4.',
     known: 0,
     missed: 0,
+    streak: 0,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -232,6 +240,7 @@ const greekCards: Flashcard[] = [
       '\u05e9\u05dc\u05d5\u05dd, \u05de\u05d4 \u05e9\u05dc\u05d5\u05de\u05da?',
     known: 0,
     missed: 0,
+    streak: 0,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -245,6 +254,7 @@ const greekCards: Flashcard[] = [
       '\u05d0\u05e0\u05d9 \u05e8\u05d5\u05e6\u05d4 \u05de\u05d9\u05dd, \u05d1\u05d1\u05e7\u05e9\u05d4.',
     known: 0,
     missed: 0,
+    streak: 0,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -307,6 +317,9 @@ function normalizeCard(card: Partial<Flashcard>): Flashcard {
     exampleTranslation: card.exampleTranslation?.trim() ?? '',
     known: Number.isFinite(card.known) ? card.known! : 0,
     missed: Number.isFinite(card.missed) ? card.missed! : 0,
+    // Defaulting here is what migrates libraries saved before streaks existed,
+    // including documents already synced to an account.
+    streak: Number.isFinite(card.streak) ? card.streak! : 0,
     intervalDays: Number.isFinite(card.intervalDays) ? card.intervalDays! : 0,
     nextReviewAt: card.nextReviewAt ?? new Date(0).toISOString(),
   };
@@ -431,6 +444,7 @@ export default function AppV5() {
   const [showAiDestination, setShowAiDestination] = useState(false);
   const [aiWorkspace, setAiWorkspace] = useState<'cards' | 'speaking'>('cards');
   const [cardIndex, setCardIndex] = useState(0);
+  const [practiceQueue, setPracticeQueue] = useState<string[]>([]);
   const [showTranslation, setShowTranslation] = useState(false);
   const [newLanguageName, setNewLanguageName] = useState('');
   const [newDeckName, setNewDeckName] = useState('');
@@ -523,13 +537,21 @@ export default function AppV5() {
       ),
     [cards],
   );
-  const reviewCards = dueCards.length
-    ? dueCards
-    : [...cards].sort(
-        (first, second) =>
-          new Date(first.nextReviewAt).getTime() -
-          new Date(second.nextReviewAt).getTime(),
-      );
+  const weakCardCount = useMemo(
+    () => cards.filter((card) => cardStrength(card) === 'needs-work').length,
+    [cards],
+  );
+  // The queue holds card IDs rather than card objects, and lives in state
+  // rather than a useMemo: grading a card mutates `cards`, which would
+  // otherwise reshuffle the round mid-practice and re-roll the randomness on
+  // every render.
+  const reviewCards = useMemo(
+    () =>
+      practiceQueue
+        .map((id) => cards.find((card) => card.id === id))
+        .filter((card): card is Flashcard => Boolean(card)),
+    [practiceQueue, cards],
+  );
   const activeCard = reviewCards[cardIndex] ?? null;
   const canUseAi = Boolean(supabase);
   const practicePhrases = useMemo(
@@ -668,10 +690,25 @@ export default function AppV5() {
     };
   }, [activityReady]);
 
+  // Builds the next practice round whenever there isn't a usable one: on first
+  // load, after a deck change, and when the previous round runs out. This is
+  // what makes practice unlimited — the queue simply refills.
+  useEffect(() => {
+    if (!storageReady || !cards.length || reviewCards.length) return;
+
+    setPracticeQueue(
+      buildPracticeQueue(cards, {
+        length: Math.max(cards.length, 12),
+      }).map((card) => card.id),
+    );
+    setCardIndex(0);
+  }, [storageReady, cards, reviewCards.length]);
+
   useEffect(() => {
     lessonEvaluationIdRef.current += 1;
     setLessonChecking(false);
     setCardIndex(0);
+    setPracticeQueue([]);
     setShowTranslation(false);
     setPronunciationFeedback(null);
     setSpokenTranscript('');
@@ -1243,6 +1280,7 @@ export default function AppV5() {
         exampleTranslation: card.exampleTranslation,
         known: 0,
         missed: 0,
+        streak: 0,
         intervalDays: 0,
         nextReviewAt: new Date(0).toISOString(),
       }));
@@ -1374,6 +1412,7 @@ export default function AppV5() {
       exampleTranslation,
       known: 0,
       missed: 0,
+      streak: 0,
       intervalDays: 0,
       nextReviewAt: new Date(0).toISOString(),
     };
@@ -1408,6 +1447,7 @@ export default function AppV5() {
       exampleTranslation: card.exampleTranslation,
       known: 0,
       missed: 0,
+      streak: 0,
       intervalDays: 0,
       nextReviewAt: new Date(0).toISOString(),
     }));
@@ -1429,11 +1469,9 @@ export default function AppV5() {
   }
 
   function markCard(result: 'known' | 'missed') {
-    if (!activeCard || !dueCards.length) {
-      setNotice('You are caught up. This card is not due yet.');
-      return;
-    }
+    if (!activeCard) return;
 
+    const wasDue = isDue(activeCard);
     const reviewedCard = applyReviewResult(activeCard, result);
 
     updateSelectedDeck((deck) => ({
@@ -1443,7 +1481,17 @@ export default function AppV5() {
       ),
     }));
     setShowTranslation(false);
-    setCardIndex(0);
+
+    // Emptying the queue makes the effect above build a fresh round, so
+    // practice continues instead of stopping at the end of the deck.
+    const nextIndex = cardIndex + 1;
+    if (nextIndex >= reviewCards.length) {
+      setPracticeQueue([]);
+      setCardIndex(0);
+    } else {
+      setCardIndex(nextIndex);
+    }
+
     recordActivity({ units: 1, xp: result === 'known' ? 8 : 4 });
     void Haptics.notificationAsync(
       result === 'known'
@@ -1451,11 +1499,13 @@ export default function AppV5() {
         : Haptics.NotificationFeedbackType.Warning,
     );
     setNotice(
-      result === 'known'
-        ? `Scheduled again in ${reviewedCard.intervalDays} day${
-            reviewedCard.intervalDays === 1 ? '' : 's'
-          }.`
-        : 'This card will return tomorrow.',
+      result === 'missed'
+        ? 'Marked for more work. It will come back sooner and more often.'
+        : wasDue
+          ? `Scheduled again in ${reviewedCard.intervalDays} day${
+              reviewedCard.intervalDays === 1 ? '' : 's'
+            }.`
+          : 'Extra practice counted. Its review date is unchanged.',
     );
   }
 
@@ -2301,13 +2351,18 @@ export default function AppV5() {
               {selectedLanguage?.name} / {selectedDeck?.name}
             </Text>
           </View>
-          <Text style={styles.reviewCount}>{dueCards.length} due</Text>
+          <Text style={styles.reviewCount}>
+            {dueCards.length} due
+            {weakCardCount ? ` · ${weakCardCount} need work` : ''}
+          </Text>
         </View>
         {!dueCards.length && cards.length ? (
           <View style={styles.caughtUpBox}>
             <Text style={styles.caughtUpTitle}>You are caught up</Text>
             <Text style={styles.panelText}>
-              The next scheduled card is shown for viewing and editing.
+              Keep practising as long as you like — the words you find hardest
+              come up most. Answering one correctly early will not change its
+              review date.
             </Text>
           </View>
         ) : null}
@@ -2325,10 +2380,13 @@ export default function AppV5() {
               onPress={toggleCardTranslation}
               style={styles.card}
             >
-              <Text style={styles.cardLabel}>
-                {dueCards.length ? 'Due card' : 'Next card'} {cardIndex + 1} of{' '}
-                {reviewCards.length}
-              </Text>
+              <View style={styles.cardLabelRow}>
+                <Text style={styles.cardLabel}>
+                  {isDue(activeCard) ? 'Due card' : 'Extra practice'}{' '}
+                  {cardIndex + 1} of {reviewCards.length}
+                </Text>
+                <StrengthBadge strength={cardStrength(activeCard)} />
+              </View>
               <Text style={styles.cardTerm}>{activeCard.term}</Text>
               <Text style={styles.cardHint}>
                 {showTranslation ? 'Hide translation' : 'Show translation'}
@@ -2378,14 +2436,14 @@ export default function AppV5() {
 
         <View style={styles.actionRow}>
           <ActionButton
-            disabled={!activeCard || !dueCards.length}
+            disabled={!activeCard}
             icon={Check}
             kind="success"
             label="I knew it"
             onPress={() => markCard('known')}
           />
           <ActionButton
-            disabled={!activeCard || !dueCards.length}
+            disabled={!activeCard}
             icon={RotateCcw}
             kind="danger"
             label="Needs work"
@@ -3521,6 +3579,29 @@ function Field({
   );
 }
 
+const STRENGTH_LABELS: Record<CardStrength, string> = {
+  new: 'New',
+  'needs-work': 'Needs work',
+  learning: 'Learning',
+  strong: 'Strong',
+};
+
+/** Makes the app's memory of a card visible, rather than only acting on it. */
+function StrengthBadge({ strength }: { strength: CardStrength }) {
+  return (
+    <Text
+      style={[
+        styles.strengthBadge,
+        strength === 'needs-work' && styles.strengthNeedsWork,
+        strength === 'learning' && styles.strengthLearning,
+        strength === 'strong' && styles.strengthStrong,
+      ]}
+    >
+      {STRENGTH_LABELS[strength]}
+    </Text>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.statBox}>
@@ -3871,6 +3952,25 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   cardLabel: { color: '#B4C8C4', fontSize: 13, fontWeight: '800' },
+  cardLabelRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  strengthBadge: {
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    color: '#E6EFEC',
+    fontSize: 11,
+    fontWeight: '900',
+    overflow: 'hidden',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  strengthNeedsWork: { backgroundColor: '#7A2E22', color: '#FFD9D0' },
+  strengthLearning: { backgroundColor: '#7A5A22', color: '#FFE9C7' },
+  strengthStrong: { backgroundColor: '#1F5E59', color: '#D6F0EA' },
   cardTerm: {
     color: '#FFFFFF',
     fontSize: 38,

@@ -1,10 +1,31 @@
-# Language Learning App v0.9.0
+# Language Learning App v0.10.0
 
 A language-learning app built with React Native, Expo, and TypeScript. It runs
 on iPhone through Expo Go **and** as a responsive website on desktop, laptop,
 tablet, and mobile browsers, from a single codebase. Flashcards and progress
 are stored locally on each device; access to the app itself requires a
 signed-in account that an admin approves.
+
+## Version 0.10.0
+
+### Practice adapts to what you find hard
+
+- Each card now remembers a run of consecutive correct answers, not just
+  lifetime totals, so "I used to get this wrong but now I don't" is
+  distinguishable from "I still get this wrong".
+- Quick review draws weak cards far more often than strong ones. A card you
+  keep missing comes back several times as often as one you reliably know.
+- Every card shows its status: **New**, **Needs work**, **Learning**, or
+  **Strong**, and the review heading counts how many still need work.
+
+### Practice no longer stops
+
+- Finishing the due cards no longer disables the grading buttons. A fresh round
+  is built automatically, so you can keep going as long as you like — there is
+  no daily cap.
+- Answering correctly on a card that isn't due yet counts as practice but
+  leaves its review date alone, so drilling a deck can't bury it for months.
+  Answering wrongly always brings it back tomorrow.
 
 ## Version 0.9.0
 
