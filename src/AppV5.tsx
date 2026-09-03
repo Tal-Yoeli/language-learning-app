@@ -87,10 +87,13 @@ import {
   applyReviewResult,
   buildPracticeQueue,
   cardStrength,
+  DEFAULT_EASE,
+  initialEaseFor,
   isDue,
   isLocallyAcceptableAnswer,
   summarizeLessonOutcomes,
   type CardStrength,
+  type Grade,
 } from './lib/learning';
 import {
   applyActivityEvent,
@@ -100,7 +103,7 @@ import {
   type ActivityEvent,
   type ActivityState,
 } from './lib/engagement';
-import { supabase } from './lib/supabase';
+import { fetchAiBudget, supabase, type AiBudget } from './lib/supabase';
 
 type Screen = 'library' | 'lesson' | 'add' | 'ai';
 
@@ -141,8 +144,10 @@ type Flashcard = {
   exampleTranslation: string;
   known: number;
   missed: number;
-  /** Consecutive correct answers; drives how often the card comes back. */
+  /** Consecutive confident recalls; drives how often the card comes back. */
   streak: number;
+  /** SM-2 style difficulty; lower means the card keeps feeling hard. */
+  ease: number;
   intervalDays: number;
   nextReviewAt: string;
 };
@@ -177,6 +182,26 @@ const OLD_CARDS_STORAGE_KEY = 'language-learning/cards/v1';
 const OLD_SETTINGS_STORAGE_KEY = 'language-learning/settings/v1';
 // The Edge Functions clamp to this same ceiling, so raising it here is enough.
 const MAX_AI_CARDS_PER_REQUEST = 25;
+/** Ordered worst to best, matching the Grade scale in src/lib/learning.ts. */
+const GRADE_BUTTONS: Array<{
+  grade: Grade;
+  label: string;
+  icon: LucideIcon;
+  kind: 'primary' | 'success' | 'danger' | 'warning';
+}> = [
+  { grade: 'again', label: "Didn't know", icon: X, kind: 'danger' },
+  { grade: 'hard', label: 'Hard', icon: RotateCcw, kind: 'warning' },
+  { grade: 'good', label: 'Good', icon: Check, kind: 'success' },
+  { grade: 'easy', label: 'Easy', icon: Trophy, kind: 'primary' },
+];
+// More effort recalled is worth more, but getting it wrong still earns
+// something so that honest self-grading is never punished.
+const GRADE_XP: Record<Grade, number> = {
+  again: 4,
+  hard: 6,
+  good: 8,
+  easy: 10,
+};
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 // Matches the image cap: the practical ceiling is the Edge Function request
 // body, not OpenAI's own 50 MB file limit.
@@ -211,6 +236,7 @@ const arabicCards: Flashcard[] = [
     known: 0,
     missed: 0,
     streak: 0,
+    ease: DEFAULT_EASE,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -224,6 +250,7 @@ const arabicCards: Flashcard[] = [
     known: 0,
     missed: 0,
     streak: 0,
+    ease: DEFAULT_EASE,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -241,6 +268,7 @@ const greekCards: Flashcard[] = [
     known: 0,
     missed: 0,
     streak: 0,
+    ease: DEFAULT_EASE,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -255,6 +283,7 @@ const greekCards: Flashcard[] = [
     known: 0,
     missed: 0,
     streak: 0,
+    ease: DEFAULT_EASE,
     intervalDays: 0,
     nextReviewAt: new Date(0).toISOString(),
   },
@@ -317,9 +346,10 @@ function normalizeCard(card: Partial<Flashcard>): Flashcard {
     exampleTranslation: card.exampleTranslation?.trim() ?? '',
     known: Number.isFinite(card.known) ? card.known! : 0,
     missed: Number.isFinite(card.missed) ? card.missed! : 0,
-    // Defaulting here is what migrates libraries saved before streaks existed,
-    // including documents already synced to an account.
+    // Defaulting here is what migrates libraries saved before streaks and ease
+    // existed, including documents already synced to an account.
     streak: Number.isFinite(card.streak) ? card.streak! : 0,
+    ease: Number.isFinite(card.ease) ? card.ease! : initialEaseFor(card),
     intervalDays: Number.isFinite(card.intervalDays) ? card.intervalDays! : 0,
     nextReviewAt: card.nextReviewAt ?? new Date(0).toISOString(),
   };
@@ -414,6 +444,19 @@ function hydrateActivity(value: unknown, today: string): ActivityState | null {
   };
 }
 
+/**
+ * Remaining monthly AI allowance, as dollars. This mirrors the server-side
+ * estimate, not an OpenAI invoice, so it is shown to set expectations rather
+ * than as an authoritative figure.
+ */
+function formatBudgetRemaining(budget: AiBudget) {
+  const remaining = Math.max(
+    0,
+    budget.budgetMicroUsd - budget.spentMicroUsd,
+  );
+  return `$${(remaining / 1_000_000).toFixed(2)}`;
+}
+
 /** Serialised demo library, used to tell untouched devices from real ones. */
 const PRISTINE_LIBRARY_JSON = JSON.stringify(initialLibrary);
 
@@ -475,6 +518,7 @@ export default function AppV5() {
     [],
   );
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiBudget, setAiBudget] = useState<AiBudget | null>(null);
   const [practiceSentence, setPracticeSentence] = useState('');
   const [spokenTranscript, setSpokenTranscript] = useState('');
   const [pronunciationFeedback, setPronunciationFeedback] =
@@ -524,6 +568,14 @@ export default function AppV5() {
   const managementPanel = useMemo(
     () => (layout.splitDashboard ? { width: '48%' as const } : null),
     [layout.splitDashboard],
+  );
+  // Four grades side by side are unreadably narrow on a phone, so they wrap to
+  // 2x2 there and open out into a single row once there is width. The 48%
+  // leaves headroom for the 9px gap; an exact 50% overflows and wraps to one
+  // button per line.
+  const gradeButtonStyle = useMemo(
+    () => ({ width: layout.isPhone ? ('48%' as const) : ('23.5%' as const) }),
+    [layout.isPhone],
   );
   // The percentages leave headroom for the 9px gap between tiles; an exact
   // 100/n split overflows the row and wraps to a single tile per line.
@@ -717,6 +769,33 @@ export default function AppV5() {
     });
     setCardIndex(0);
   }, [storageReady, selectedDeck?.id, cards, practice.deckId, reviewCards.length]);
+
+  // Refreshed when the AI tab opens and after each AI call.
+  //
+  // Read twice on purpose. The server charges a flat provisional reservation
+  // before calling OpenAI and reconciles it to the true cost in the background
+  // once the response has been sent, so a single read taken the moment a call
+  // finishes shows the reservation (5% of the monthly budget) rather than what
+  // was actually spent, and would sit there stale for as long as the user
+  // stayed on this tab. The second read collects the reconciled figure.
+  useEffect(() => {
+    if (screen !== 'ai' || !canUseAi || aiLoading) return;
+
+    let cancelled = false;
+
+    const read = async () => {
+      const budget = await fetchAiBudget().catch(() => null);
+      if (!cancelled) setAiBudget(budget);
+    };
+
+    void read();
+    const settleTimer = setTimeout(() => void read(), 2_500);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(settleTimer);
+    };
+  }, [screen, canUseAi, aiLoading]);
 
   useEffect(() => {
     lessonEvaluationIdRef.current += 1;
@@ -1294,6 +1373,7 @@ export default function AppV5() {
         known: 0,
         missed: 0,
         streak: 0,
+        ease: DEFAULT_EASE,
         intervalDays: 0,
         nextReviewAt: new Date(0).toISOString(),
       }));
@@ -1426,6 +1506,7 @@ export default function AppV5() {
       known: 0,
       missed: 0,
       streak: 0,
+      ease: DEFAULT_EASE,
       intervalDays: 0,
       nextReviewAt: new Date(0).toISOString(),
     };
@@ -1461,6 +1542,7 @@ export default function AppV5() {
       known: 0,
       missed: 0,
       streak: 0,
+      ease: DEFAULT_EASE,
       intervalDays: 0,
       nextReviewAt: new Date(0).toISOString(),
     }));
@@ -1481,11 +1563,11 @@ export default function AppV5() {
     setScreen('library');
   }
 
-  function markCard(result: 'known' | 'missed') {
+  function markCard(grade: Grade) {
     if (!activeCard) return;
 
     const wasDue = isDue(activeCard);
-    const reviewedCard = applyReviewResult(activeCard, result);
+    const reviewedCard = applyReviewResult(activeCard, grade);
 
     updateSelectedDeck((deck) => ({
       ...deck,
@@ -1505,15 +1587,15 @@ export default function AppV5() {
       setCardIndex(nextIndex);
     }
 
-    recordActivity({ units: 1, xp: result === 'known' ? 8 : 4 });
+    recordActivity({ units: 1, xp: GRADE_XP[grade] });
     void Haptics.notificationAsync(
-      result === 'known'
-        ? Haptics.NotificationFeedbackType.Success
-        : Haptics.NotificationFeedbackType.Warning,
+      grade === 'again'
+        ? Haptics.NotificationFeedbackType.Warning
+        : Haptics.NotificationFeedbackType.Success,
     );
     setNotice(
-      result === 'missed'
-        ? 'Marked for more work. It will come back sooner and more often.'
+      grade === 'again'
+        ? 'Marked as not known. It will come back tomorrow, and more often.'
         : wasDue
           ? `Scheduled again in ${reviewedCard.intervalDays} day${
               reviewedCard.intervalDays === 1 ? '' : 's'
@@ -2447,21 +2529,18 @@ export default function AppV5() {
           </View>
         )}
 
-        <View style={styles.actionRow}>
-          <ActionButton
-            disabled={!activeCard}
-            icon={Check}
-            kind="success"
-            label="I knew it"
-            onPress={() => markCard('known')}
-          />
-          <ActionButton
-            disabled={!activeCard}
-            icon={RotateCcw}
-            kind="danger"
-            label="Needs work"
-            onPress={() => markCard('missed')}
-          />
+        <View style={styles.gradeGrid}>
+          {GRADE_BUTTONS.map((button) => (
+            <View key={button.grade} style={gradeButtonStyle}>
+              <ActionButton
+                disabled={!activeCard}
+                icon={button.icon}
+                kind={button.kind}
+                label={button.label}
+                onPress={() => markCard(button.grade)}
+              />
+            </View>
+          ))}
         </View>
 
         {activeCard ? (
@@ -3101,7 +3180,13 @@ export default function AppV5() {
         <Header
           kicker="OPENAI"
           title="AI studio"
-          badge={canUseAi ? 'Connected' : 'Needs Supabase'}
+          badge={
+            !canUseAi
+              ? 'Needs Supabase'
+              : aiBudget && aiBudget.budgetMicroUsd > 0
+                ? `${formatBudgetRemaining(aiBudget)} left`
+                : 'Connected'
+          }
         />
 
         <View style={styles.modeSwitch}>
@@ -3633,7 +3718,7 @@ function ActionButton({
 }: {
   disabled?: boolean;
   icon?: LucideIcon;
-  kind?: 'primary' | 'secondary' | 'success' | 'danger';
+  kind?: 'primary' | 'secondary' | 'success' | 'danger' | 'warning';
   label: string;
   onPress: () => void;
 }) {
@@ -3642,7 +3727,9 @@ function ActionButton({
       ? '#FFFFFF'
       : kind === 'danger'
         ? '#A33A2A'
-        : '#1F5E59';
+        : kind === 'warning'
+          ? '#8A5A1B'
+          : '#1F5E59';
 
   return (
     <Pressable
@@ -3655,6 +3742,7 @@ function ActionButton({
           kind === 'primary' && styles.primaryButton,
           kind === 'success' && styles.successButton,
           kind === 'danger' && styles.dangerButton,
+          kind === 'warning' && styles.warningButton,
           disabled && styles.disabled,
           pressed && !disabled && styles.pressed,
         ]}
@@ -3666,6 +3754,7 @@ function ActionButton({
           kind === 'primary' && styles.primaryButtonText,
           kind === 'success' && styles.successButtonText,
           kind === 'danger' && styles.dangerButtonText,
+          kind === 'warning' && styles.warningButtonText,
         ]}
       >
         {label}
@@ -4068,6 +4157,10 @@ const styles = StyleSheet.create({
   successButtonText: { color: '#1F5E59' },
   dangerButton: { borderColor: '#F9E3DF', backgroundColor: '#F9E3DF' },
   dangerButtonText: { color: '#A33A2A' },
+  warningButton: { borderColor: '#F7E7CD', backgroundColor: '#F7E7CD' },
+  warningButtonText: { color: '#8A5A1B' },
+  // Wraps to 2x2 on a phone and sits in one row once there is width for it.
+  gradeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 },
   disabled: { opacity: 0.42 },
   phraseList: { gap: 8 },
   previewList: { gap: 9 },

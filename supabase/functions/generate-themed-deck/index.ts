@@ -1,4 +1,11 @@
-import { consumeAiQuota, describeError } from '../_shared/auth.ts';
+import {
+  consumeAiQuota,
+  describeError,
+  recordAiSpend,
+  releaseAiReservation,
+  type QuotaResult,
+} from '../_shared/auth.ts';
+import { estimateResponseCost } from '../_shared/pricing.ts';
 import { jsonResponse, preflightResponse } from '../_shared/cors.ts';
 import {
   createOpenAIResponse,
@@ -34,15 +41,41 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: 'Method not allowed.' }, 405, request);
   }
 
-  try {
-    await consumeAiQuota(request);
+  // Declared outside the try so the catch can see them. `settled` means "the
+  // reservation is committed" -- set once an OpenAI call has been started or a
+  // cost recorded, so the catch only refunds requests that never reached the
+  // model at all.
+  let quota: QuotaResult | null = null;
+  let settled = false;
+  // Fired by the OpenAI helper the instant a request is actually dispatched:
+  // after the API key resolves (so a missing key still refunds) and before the
+  // response arrives (so a timeout does not). A spend guard must err toward
+  // over-counting rather than refunding a call OpenAI already billed.
+  const markDispatched = () => {
+    settled = true;
+  };
 
-    const body = (await request.json()) as RequestBody;
+  try {
+    quota = await consumeAiQuota(request);
+
+    // request.json() throws on a malformed body, and that would otherwise
+    // escape to the catch block with the reservation still charged for a
+    // request that never reached OpenAI.
+    let body: RequestBody;
+    try {
+      body = (await request.json()) as RequestBody;
+    } catch {
+      await releaseAiReservation(quota);
+      settled = true;
+      return jsonResponse({ error: 'Invalid JSON body.' }, 400, request);
+    }
     const goal = body.goal?.trim();
     const nativeLanguage = body.nativeLanguage?.trim();
     const learningLanguage = body.learningLanguage?.trim();
 
     if (!goal || !nativeLanguage || !learningLanguage) {
+      await releaseAiReservation(quota);
+      settled = true;
       return jsonResponse(
         { error: 'goal, nativeLanguage, and learningLanguage are required.' },
         400,
@@ -114,7 +147,10 @@ Deno.serve(async (request) => {
           },
         },
       },
-    });
+    }, markDispatched);
+
+    await recordAiSpend(quota, estimateResponseCost(response));
+    settled = true;
 
     const parsed = parseJsonOutput<GeneratedDeckResponse>(response);
     const cards = parsed.cards
@@ -137,6 +173,13 @@ Deno.serve(async (request) => {
       request,
     );
   } catch (error) {
+    // Nothing was billed, so give the reservation back. Without this a broken
+    // OPENAI_API_KEY -- which throws before any network call -- would let a
+    // handful of retries burn a user's whole month for zero AI work.
+    if (quota && !settled) {
+      await releaseAiReservation(quota);
+    }
+
     const { message, status } = describeError(error);
     return jsonResponse({ error: message }, status, request);
   }

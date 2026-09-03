@@ -1,4 +1,14 @@
-import { consumeAiQuota, describeError } from '../_shared/auth.ts';
+import {
+  consumeAiQuota,
+  describeError,
+  recordAiSpend,
+  releaseAiReservation,
+  type QuotaResult,
+} from '../_shared/auth.ts';
+import {
+  estimateResponseCost,
+  estimateTranscriptionCost,
+} from '../_shared/pricing.ts';
 import { jsonResponse, preflightResponse } from '../_shared/cors.ts';
 import {
   createOpenAIResponse,
@@ -34,13 +44,39 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: 'Method not allowed.' }, 405, request);
   }
 
-  try {
-    await consumeAiQuota(request);
+  // Declared outside the try so the catch can see them. `settled` means "the
+  // reservation is committed" -- set once an OpenAI call has been started or a
+  // cost recorded, so the catch only refunds requests that never reached the
+  // model at all.
+  let quota: QuotaResult | null = null;
+  let settled = false;
+  // Fired by the OpenAI helper the instant a request is actually dispatched:
+  // after the API key resolves (so a missing key still refunds) and before the
+  // response arrives (so a timeout does not). A spend guard must err toward
+  // over-counting rather than refunding a call OpenAI already billed.
+  const markDispatched = () => {
+    settled = true;
+  };
 
-    const body = (await request.json()) as RequestBody;
+  try {
+    quota = await consumeAiQuota(request);
+
+    // request.json() throws on a malformed body, and that would otherwise
+    // escape to the catch block with the reservation still charged for a
+    // request that never reached OpenAI.
+    let body: RequestBody;
+    try {
+      body = (await request.json()) as RequestBody;
+    } catch {
+      await releaseAiReservation(quota);
+      settled = true;
+      return jsonResponse({ error: 'Invalid JSON body.' }, 400, request);
+    }
     const expectedSentence = body.expectedSentence?.trim();
 
     if (!expectedSentence) {
+      await releaseAiReservation(quota);
+      settled = true;
       return jsonResponse(
         { error: 'expectedSentence is required.' },
         400,
@@ -49,6 +85,11 @@ Deno.serve(async (request) => {
     }
 
     let transcript = body.transcript?.trim() ?? '';
+    // This endpoint makes two paid calls. Their costs are summed and reported
+    // in a SINGLE recordAiSpend at the end: each call reconciles against the
+    // one reservation consume_ai_quota took, so reporting twice would refund
+    // that reservation twice and drive the month's total downwards.
+    let costMicroUsd = 0;
 
     if (!transcript && body.audioBase64 && body.audioMimeType) {
       transcript = await transcribeAudio({
@@ -56,18 +97,38 @@ Deno.serve(async (request) => {
         audioMimeType: body.audioMimeType,
         fileName: body.fileName,
         prompt: expectedSentence,
+        onDispatch: markDispatched,
       });
+      // Counted only once the transcription actually succeeded, so a failed
+      // call is never billed against the learner's budget.
+      costMicroUsd += estimateTranscriptionCost(body.audioBase64.length);
     }
 
     if (!transcript) {
+      // A silent clip still ran a real, paid transcription. Releasing the
+      // reservation here would refund it, so repeated silent recordings could
+      // run unlimited paid calls while driving recorded spend to zero.
+      if (costMicroUsd > 0) {
+        await recordAiSpend(quota, costMicroUsd);
+      } else {
+        await releaseAiReservation(quota);
+      }
+      settled = true;
+
       return jsonResponse(
-        { error: 'transcript or audioBase64 is required.' },
+        { error: 'No speech was detected in that recording.' },
         400,
         request,
       );
     }
 
-    const response = await createOpenAIResponse({
+    // If this second call fails, the transcription above has already been paid
+    // for. Letting the error escape unrecorded would leave only the
+    // reservation standing against a larger real cost -- under-counting, which
+    // is the wrong direction for a spend guard to be wrong in.
+    let response;
+    try {
+      response = await createOpenAIResponse({
       model: getTextModel(),
       input: [
         {
@@ -125,7 +186,19 @@ Deno.serve(async (request) => {
           },
         },
       },
-    });
+    }, markDispatched);
+    } catch (error) {
+      // Deliberately records nothing. record_ai_spend subtracts the
+      // reservation from whatever it is given, so reporting just the
+      // transcription cost here would net out as a REFUND for a request that
+      // made two paid calls. Leaving the reservation standing is the
+      // conservative outcome, and markDispatched has already committed it.
+      throw error;
+    }
+
+    costMicroUsd += estimateResponseCost(response);
+    await recordAiSpend(quota, costMicroUsd);
+    settled = true;
 
     const parsed = parseJsonOutput<FeedbackResponse>(response);
 
@@ -139,6 +212,13 @@ Deno.serve(async (request) => {
       request,
     );
   } catch (error) {
+    // Nothing was billed, so give the reservation back. Without this a broken
+    // OPENAI_API_KEY -- which throws before any network call -- would let a
+    // handful of retries burn a user's whole month for zero AI work.
+    if (quota && !settled) {
+      await releaseAiReservation(quota);
+    }
+
     const { message, status } = describeError(error);
     return jsonResponse({ error: message }, status, request);
   }

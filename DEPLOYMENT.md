@@ -45,13 +45,35 @@ value itself is never shown back).
    — this is what sends you the "new signup" email; see step 1.5 below.
 5. Paste and run `supabase/migrations/20260803000000_user_state_sync.sql`
    — this is what makes decks and progress follow the account across devices.
-   (Or run `npx supabase db push --project-ref gxawhrkctjhneasimoek` once for
-   all of them, if you prefer the CLI.)
+6. Paste and run `supabase/migrations/20260807000000_ai_spend_budget.sql`
+   — this adds the $0.50/month per-person AI budget, exempts your own account,
+   and closes a hole that let any signed-in user edit their own `approved`
+   and budget columns. **Without it no budget is tracked at all.**
+
+Or run `npx supabase db push --project-ref gxawhrkctjhneasimoek` once for all
+of them, if you prefer the CLI.
 
 Expected result: `Success. No rows returned` for each.
-Verify: **Table Editor** shows `profiles` with an `approved` column
-(default `false`) and an `approval_token` column. All three migrations only
-create or additively alter — nothing existing is dropped.
+Verify: **Table Editor** shows `profiles` with `approved`, `approval_token`
+and `monthly_budget_micro_usd` columns, plus `ai_spend` and `user_state`
+tables.
+
+The migrations only create or additively alter your **data**, with one
+deliberate exception: `20260807000000` revokes `insert`/`update` on `profiles`
+from signed-in users and drops the `profiles_insert_own` policy. Those
+permissions let anyone set `approved = true` and an unlimited budget on their
+own row, bypassing both the approval gate and the spend cap. The app never
+used them, so nothing breaks.
+
+That migration also backfills a `profiles` row for any account that predates
+the approval system. Those accounts arrive **unapproved and send you no email**
+(the notification trigger is suspended during the backfill so you don't get one
+message per existing user). If anyone is stuck on "Waiting for approval" with
+no email, approve them directly:
+
+```sql
+update public.profiles set approved = true where email = 'them@example.com';
+```
 
 Rollback for `20260730000000_user_approval.sql`:
 
@@ -60,6 +82,21 @@ drop trigger if exists on_auth_user_created on auth.users;
 drop function if exists public.handle_new_user();
 alter table public.profiles drop column if exists approved;
 alter table public.profiles drop column if exists approval_token;
+```
+
+Rollback for `20260807000000_ai_spend_budget.sql`:
+
+```sql
+drop function if exists public.record_ai_spend(uuid, date, bigint);
+drop function if exists public.ai_spend_reservation_micro_usd();
+drop table if exists public.ai_spend;
+alter table public.profiles drop column if exists monthly_budget_micro_usd;
+-- then re-run 20260730000000_user_approval.sql's consume_ai_quota()
+--
+-- Deliberately does NOT restore `grant update on public.profiles`: that grant
+-- is what let any signed-in user PATCH `approved = true` on their own row and
+-- walk past the approval gate. The rollback works without it, and the client
+-- only ever SELECTs from profiles.
 ```
 
 Rollback for `20260730010000_notify_signup_trigger.sql`:

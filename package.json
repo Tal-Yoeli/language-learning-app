@@ -1,6 +1,6 @@
 {
   "name": "firstcodexproject",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",
@@ -30,7 +30,7 @@
     "start": "expo start",
     "start:lan": "expo start --host lan",
     "start:tunnel": "expo start --tunnel",
-    "test:learning": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test tests/learning.test.mts tests/engagement.test.mts tests/platform.test.mts tests/responsive.test.mts tests/cloudSync.test.mts",
+    "test:learning": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types --test tests/learning.test.mts tests/engagement.test.mts tests/platform.test.mts tests/responsive.test.mts tests/cloudSync.test.mts tests/pricing.test.mts",
     "typecheck": "tsc --noEmit",
     "android": "expo start --android",
     "ios": "expo start --ios",

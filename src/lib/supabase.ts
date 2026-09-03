@@ -26,6 +26,8 @@ export type Database = {
           created_at: string;
           approved: boolean;
           approval_token: string;
+          /** Monthly AI allowance in micro-USD; 0 means unlimited. */
+          monthly_budget_micro_usd: number;
         };
         Insert: {
           id: string;
@@ -35,6 +37,7 @@ export type Database = {
           created_at?: string;
           approved?: boolean;
           approval_token?: string;
+          monthly_budget_micro_usd?: number;
         };
         Update: {
           email?: string | null;
@@ -42,6 +45,7 @@ export type Database = {
           learning_language?: string;
           approved?: boolean;
           approval_token?: string;
+          monthly_budget_micro_usd?: number;
         };
         Relationships: [];
       };
@@ -70,6 +74,23 @@ export type Database = {
           example?: string | null;
           source?: string;
         };
+        Relationships: [];
+      };
+      ai_spend: {
+        Row: {
+          user_id: string;
+          period_month: string;
+          micro_usd: number;
+          request_count: number;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          period_month: string;
+          micro_usd?: number;
+          request_count?: number;
+        };
+        Update: { micro_usd?: number; request_count?: number };
         Relationships: [];
       };
       user_state: {
@@ -245,4 +266,56 @@ export function subscribeToAuthState(onChange: () => void) {
   const { data } = supabase.auth.onAuthStateChange(() => onChange());
 
   return () => data.subscription.unsubscribe();
+}
+
+export type AiBudget = {
+  /** Estimated micro-USD spent this calendar month (UTC). */
+  spentMicroUsd: number;
+  /** Monthly allowance in micro-USD; 0 means unlimited. */
+  budgetMicroUsd: number;
+};
+
+/**
+ * Reads the caller's own AI spend for the current month. Relies on the
+ * `ai_spend_select_own` / `profiles_select_own` RLS policies, so a user can
+ * only ever see their own figures.
+ *
+ * This is the same estimate the server enforces against, shown so the limit
+ * does not arrive as a surprise. It is not a billing figure from OpenAI.
+ */
+export async function fetchAiBudget(): Promise<AiBudget | null> {
+  if (!supabase) return null;
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user?.id;
+
+  if (!userId) return null;
+
+  const period = new Date();
+  const periodMonth = `${period.getUTCFullYear()}-${String(
+    period.getUTCMonth() + 1,
+  ).padStart(2, '0')}-01`;
+
+  const [profile, spend] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('monthly_budget_micro_usd')
+      .eq('id', userId)
+      .maybeSingle(),
+    supabase
+      .from('ai_spend')
+      .select('micro_usd')
+      .eq('user_id', userId)
+      .eq('period_month', periodMonth)
+      .maybeSingle(),
+  ]);
+
+  // A failed spend read must not be reported as zero spent: the badge would
+  // promise the full allowance right before the server refuses the next call.
+  if (profile.error || spend.error) return null;
+
+  return {
+    spentMicroUsd: Number(spend.data?.micro_usd ?? 0) || 0,
+    budgetMicroUsd: Number(profile.data?.monthly_budget_micro_usd ?? 0) || 0,
+  };
 }

@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   applyReviewResult,
+  GRADES,
+  initialEaseFor,
   buildPracticeQueue,
   cardStrength,
   isLocallyAcceptableAnswer,
@@ -21,6 +23,7 @@ function card(overrides: Record<string, unknown> = {}) {
     known: 0,
     missed: 0,
     streak: 0,
+    ease: 2.5,
     intervalDays: 0,
     nextReviewAt: LONG_AGO,
     ...overrides,
@@ -50,39 +53,80 @@ test('leaves spelling differences and semantic synonyms for server evaluation', 
   assert.equal(isLocallyAcceptableAnswer('automobile', 'car'), false);
 });
 
-test('advances known cards through the spaced-review intervals', () => {
+test('good advances a card through the spaced-review intervals', () => {
   const reviewedAt = new Date('2026-07-16T12:00:00.000Z');
 
   const reviewed = applyReviewResult(
     card({ known: 2, missed: 1, intervalDays: 1 }),
-    'known',
+    'good',
     reviewedAt,
   );
 
   assert.equal(reviewed.known, 3);
   assert.equal(reviewed.missed, 1);
   assert.equal(reviewed.intervalDays, 3);
+  assert.equal(reviewed.ease, 2.55, 'good nudges ease back up');
   assert.equal(reviewed.nextReviewAt, '2026-07-19T12:00:00.000Z');
 });
 
-test('returns missed cards to a one-day interval', () => {
+test('again returns a card to a one-day interval and lowers ease', () => {
   const reviewed = applyReviewResult(
     card({ known: 4, missed: 0, intervalDays: 12 }),
-    'missed',
+    'again',
     new Date('2026-07-16T12:00:00.000Z'),
   );
 
-  assert.equal(reviewed.known, 4);
+  assert.equal(reviewed.known, 4, 'again must not count as a recall');
   assert.equal(reviewed.missed, 1);
   assert.equal(reviewed.intervalDays, 1);
+  assert.equal(reviewed.ease, 2.25);
   assert.equal(reviewed.nextReviewAt, '2026-07-17T12:00:00.000Z');
 });
 
-test('a correct answer on a card that is not due keeps its schedule', () => {
+test('hard keeps the card but grows the interval only slightly', () => {
+  const reviewed = applyReviewResult(
+    card({ known: 3, missed: 1, streak: 2, intervalDays: 10 }),
+    'hard',
+    NOW,
+  );
+
+  assert.equal(reviewed.known, 4, 'hard is still a recall');
+  assert.equal(reviewed.missed, 1);
+  assert.equal(reviewed.streak, 2, 'hard holds the streak rather than extending it');
+  assert.equal(reviewed.ease, 2.35);
+  assert.equal(reviewed.intervalDays, 12, '10 * 1.2');
+});
+
+test('easy grows the interval fastest and raises ease', () => {
+  const good = applyReviewResult(card({ intervalDays: 10 }), 'good', NOW);
+  const easy = applyReviewResult(card({ intervalDays: 10 }), 'easy', NOW);
+
+  assert.ok(
+    easy.intervalDays > good.intervalDays,
+    `easy (${easy.intervalDays}) should outpace good (${good.intervalDays})`,
+  );
+  assert.equal(easy.ease, 2.65);
+});
+
+test('ease is clamped at both ends', () => {
+  let hardened = card({ intervalDays: 5 });
+  for (let index = 0; index < 12; index += 1) {
+    hardened = applyReviewResult(hardened, 'again', NOW);
+  }
+  assert.equal(hardened.ease, 1.3, 'ease must not fall below the floor');
+
+  let eased = card({ intervalDays: 5 });
+  for (let index = 0; index < 12; index += 1) {
+    eased = applyReviewResult(eased, 'easy', NOW);
+  }
+  assert.equal(eased.ease, 2.8, 'ease must not rise above the ceiling');
+});
+
+test('a recall on a card that is not due keeps its schedule', () => {
   // Practising ahead must not bury the card further into the future.
   const reviewed = applyReviewResult(
     card({ known: 5, missed: 1, streak: 2, intervalDays: 30, nextReviewAt: NEXT_YEAR }),
-    'known',
+    'good',
     NOW,
   );
 
@@ -92,10 +136,22 @@ test('a correct answer on a card that is not due keeps its schedule', () => {
   assert.equal(reviewed.nextReviewAt, NEXT_YEAR, 'due date must not move');
 });
 
-test('a wrong answer reschedules even when the card was not due', () => {
+test('a not-due recall still records difficulty', () => {
+  // The schedule is untouched, but marking it hard must still be remembered.
+  const reviewed = applyReviewResult(
+    card({ known: 5, streak: 2, intervalDays: 30, nextReviewAt: NEXT_YEAR }),
+    'hard',
+    NOW,
+  );
+
+  assert.equal(reviewed.ease, 2.35);
+  assert.equal(reviewed.nextReviewAt, NEXT_YEAR);
+});
+
+test('again reschedules even when the card was not due', () => {
   const reviewed = applyReviewResult(
     card({ known: 9, missed: 0, streak: 9, intervalDays: 60, nextReviewAt: NEXT_YEAR }),
-    'missed',
+    'again',
     NOW,
   );
 
@@ -104,14 +160,98 @@ test('a wrong answer reschedules even when the card was not due', () => {
   assert.equal(reviewed.nextReviewAt, '2026-08-08T12:00:00.000Z');
 });
 
-test('streak counts consecutive correct answers and resets on a miss', () => {
-  const first = applyReviewResult(card(), 'known', NOW);
+test('streak counts consecutive recalls and resets on again', () => {
+  const first = applyReviewResult(card(), 'good', NOW);
   assert.equal(first.streak, 1);
 
-  const second = applyReviewResult(first, 'known', NOW);
-  assert.equal(second.streak, 2);
+  const second = applyReviewResult(first, 'hard', NOW);
+  assert.equal(second.streak, 1, 'hard holds the streak, neither losing nor gaining');
 
-  assert.equal(applyReviewResult(second, 'missed', NOW).streak, 0);
+  const third = applyReviewResult(second, 'good', NOW);
+  assert.equal(third.streak, 2);
+
+  assert.equal(applyReviewResult(third, 'again', NOW).streak, 0);
+});
+
+test('intervals never exceed the ninety day cap', () => {
+  const reviewed = applyReviewResult(
+    card({ intervalDays: 80, ease: 2.8 }),
+    'easy',
+    NOW,
+  );
+
+  assert.equal(reviewed.intervalDays, 90);
+});
+
+test('a card recovers its rating after consistent correct answers', () => {
+  // Lessons only emit good/again, so without an upward path a card missed
+  // early would stay penalised forever however well it is later known.
+  let recovering = card({ known: 1, missed: 4, ease: 1.3, intervalDays: 1 });
+  assert.equal(cardStrength(recovering), 'needs-work');
+
+  for (let index = 0; index < 25; index += 1) {
+    recovering = applyReviewResult(recovering, 'good', NOW);
+    recovering = { ...recovering, nextReviewAt: LONG_AGO };
+  }
+
+  assert.ok(recovering.ease > 1.3, 'ease must be able to climb back');
+  assert.equal(
+    cardStrength(recovering),
+    'strong',
+    'a card answered right many times running should stop being flagged',
+  );
+});
+
+test('the four grades give a new card four different schedules', () => {
+  // Rounding used to collapse them: a fresh card offered four buttons but only
+  // two outcomes. `again` and `hard` still share one day at interval 0, since a
+  // day is the smallest step there is.
+  const fresh = card({ intervalDays: 0 });
+  const freshDays = GRADES.map(
+    (grade) => applyReviewResult(fresh, grade, NOW).intervalDays,
+  );
+  assert.deepEqual(freshDays, [1, 1, 2, 4]);
+
+  const dayOld = card({ intervalDays: 1 });
+  const dayOldDays = GRADES.map(
+    (grade) => applyReviewResult(dayOld, grade, NOW).intervalDays,
+  );
+  assert.deepEqual(dayOldDays, [1, 2, 3, 5]);
+  assert.equal(
+    new Set(dayOldDays).size,
+    4,
+    'past the first review every grade must mean something different',
+  );
+});
+
+test('legacy cards keep the verdict the old miss-rate rule gave them', () => {
+  // Upgrading must not quietly promote a card the app already knew was weak.
+  const halfMissed = initialEaseFor({ known: 5, missed: 5 });
+  assert.equal(
+    cardStrength({ known: 5, missed: 5, streak: 2, ease: halfMissed }),
+    'needs-work',
+    'a 50% miss rate was needs-work before and must stay needs-work',
+  );
+
+  const mostlyMissed = initialEaseFor({ known: 1, missed: 20 });
+  assert.equal(
+    cardStrength({ known: 1, missed: 20, streak: 3, ease: mostlyMissed }),
+    'needs-work',
+    'a heavily missed card must never read as strong on first load',
+  );
+
+  const clean = initialEaseFor({ known: 20, missed: 0 });
+  assert.equal(clean, 2.5, 'an unblemished card starts at the default ease');
+
+  // The documented trade-off: a card between ~22% and 40% misses starts as
+  // 'learning' rather than 'strong'. Pinned here so the demotion stays a known
+  // consequence rather than becoming a surprise later.
+  const borderline = initialEaseFor({ known: 10, missed: 3 });
+  assert.equal(
+    cardStrength({ known: 10, missed: 3, streak: 4, ease: borderline }),
+    'learning',
+    'a borderline legacy card is demoted, never wrongly promoted',
+  );
 });
 
 test('weaker cards outweigh stronger ones', () => {
@@ -145,11 +285,54 @@ test('being overdue raises a card, and future cards are not boosted', () => {
   assert.ok(overdue > notYetDue);
 });
 
+test('a card repeatedly graded hard is drawn more often than an easy one', () => {
+  // This is the link between the four grades and how often a card returns:
+  // the same known/missed record, separated only by accumulated ease.
+  const record = { known: 5, missed: 1, streak: 1 };
+  const struggled = practiceWeight(card({ ...record, ease: 1.3 }), NOW);
+  const comfortable = practiceWeight(card({ ...record, ease: 2.8 }), NOW);
+
+  assert.ok(
+    struggled > comfortable,
+    `low ease should outrank high ease, got ${struggled} vs ${comfortable}`,
+  );
+});
+
+test('repeatedly grading hard outranks repeatedly grading good', () => {
+  // The requirement in practice: two identical cards, separated only by how
+  // the learner graded them, must diverge so the harder one comes up more.
+  // A single `hard` is roughly weight-neutral (it is still a recall, which
+  // dilutes the miss rate); the effect is meant to compound over sessions.
+  let struggled = card({ id: 'struggled', known: 4, missed: 1, streak: 1, intervalDays: 5 });
+  let comfortable = card({ id: 'comfortable', known: 4, missed: 1, streak: 1, intervalDays: 5 });
+
+  for (let round = 0; round < 4; round += 1) {
+    struggled = applyReviewResult(struggled, 'hard', NOW);
+    comfortable = applyReviewResult(comfortable, 'good', NOW);
+  }
+
+  assert.ok(struggled.ease < comfortable.ease, 'hard should erode ease');
+
+  // Same due date on both, so only the learned difficulty separates them.
+  const struggledWeight = practiceWeight({ ...struggled, nextReviewAt: LONG_AGO }, NOW);
+  const comfortableWeight = practiceWeight({ ...comfortable, nextReviewAt: LONG_AGO }, NOW);
+
+  assert.ok(
+    struggledWeight > comfortableWeight * 2,
+    `the struggled card should dominate, got ${struggledWeight} vs ${comfortableWeight}`,
+  );
+});
+
 test('card strength labels reflect the record', () => {
   assert.equal(cardStrength(card()), 'new');
   assert.equal(cardStrength(card({ known: 1, missed: 5, streak: 0 })), 'needs-work');
-  assert.equal(cardStrength(card({ known: 8, missed: 1, streak: 4 })), 'strong');
-  assert.equal(cardStrength(card({ known: 3, missed: 2, streak: 1 })), 'learning');
+  assert.equal(
+    cardStrength(card({ known: 9, missed: 1, streak: 5, ease: 1.5 })),
+    'needs-work',
+    'a long streak must not mask a card that keeps feeling hard',
+  );
+  assert.equal(cardStrength(card({ known: 8, missed: 1, streak: 4, ease: 2.5 })), 'strong');
+  assert.equal(cardStrength(card({ known: 3, missed: 2, streak: 1, ease: 2.2 })), 'learning');
 });
 
 test('a practice round includes every due card', () => {
@@ -277,6 +460,6 @@ test('one wrong lesson direction makes the card a missed outcome', () => {
     { cardId: 'card-2', correct: true },
   ]);
 
-  assert.equal(outcomes.get('card-1'), 'missed');
-  assert.equal(outcomes.get('card-2'), 'known');
+  assert.equal(outcomes.get('card-1'), 'again');
+  assert.equal(outcomes.get('card-2'), 'good');
 });

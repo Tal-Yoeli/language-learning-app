@@ -1,10 +1,51 @@
-# Language Learning App v0.10.0
+# Language Learning App v0.11.0
 
 A language-learning app built with React Native, Expo, and TypeScript. It runs
 on iPhone through Expo Go **and** as a responsive website on desktop, laptop,
 tablet, and mobile browsers, from a single codebase. Flashcards and progress
-are stored locally on each device; access to the app itself requires a
-signed-in account that an admin approves.
+sync to your account across devices; access requires a signed-in account that
+an admin approves, and each account has its own monthly AI budget.
+
+## Version 0.11.0
+
+### Four ways to grade a card
+
+- **Didn't know · Hard · Good · Easy** replaces the old two-button choice, so
+  "I got it but it was a struggle" is no longer the same answer as "that was
+  effortless".
+- Each card now carries an *ease* value that remembers how hard it has felt
+  over time, not just whether the last answer was right. Grading a card `Hard`
+  lowers it; `Good` and `Easy` raise it back.
+- Ease feeds directly into how often a card returns, so a word you keep finding
+  difficult keeps coming back more often — and stops crowding in once you
+  genuinely know it. The four grades also stretch the review interval by
+  different amounts.
+- Existing cards keep the verdict they already had: their starting ease is
+  derived from their real answer history rather than reset to a default.
+
+### A monthly AI budget per person
+
+- Every account gets its own estimated **$0.50 per calendar month** of AI usage
+  (deck building, PDF and photo import, voice, pronunciation feedback). Your
+  own account is exempt.
+- Cost is measured from the token usage OpenAI actually reports, accumulated in
+  whole micro-dollars, and enforced in the database — not merely hidden in the
+  interface.
+- Running out blocks **only** the AI features. Decks, lessons, review, and sync
+  keep working normally, and the allowance resets on the 1st.
+- The AI tab shows what is left before you hit it.
+
+> **This is not a real OpenAI spending cap.** OpenAI bills the account
+> directly; the app can only estimate a call's cost and refuse the next one.
+> Keep a hard spending limit set on your OpenAI account — that remains the only
+> guarantee. See `DEPLOYMENT.md` step 1.8.
+
+### Security fixes
+
+- Signed-in users could previously write to their own `profiles` row, letting
+  anyone set `approved = true` and walk past the approval gate, or grant
+  themselves an unlimited budget. Both write paths are now closed at the
+  database-privilege level.
 
 ## Version 0.10.0
 

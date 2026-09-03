@@ -4,18 +4,48 @@ const OPENAI_TRANSCRIPTIONS_URL =
 const OPENAI_SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
 const OPENAI_REQUEST_TIMEOUT_MS = 60_000;
 
+/**
+ * Called at the instant a request is actually dispatched to OpenAI -- after the
+ * API key has resolved, so a missing key never fires it, and before the
+ * response arrives, so a timeout still does.
+ *
+ * The spend guard uses this to decide whether a failed request may have been
+ * billed upstream. Signalling any earlier would let a broken key burn a user's
+ * budget for zero work; any later would refund calls OpenAI really charged for.
+ */
+export type DispatchListener = () => void;
+
 async function fetchOpenAI(
   url: string,
   init: RequestInit,
   operation: string,
   timeoutMs = OPENAI_REQUEST_TIMEOUT_MS,
+  onDispatch?: DispatchListener,
 ) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+
+    // A 4xx means OpenAI rejected the request outright -- a bad key, a
+    // malformed payload, a rate limit -- and did not bill for it, so the
+    // reservation must be given back. Anything else (success, or a 5xx that
+    // may have completed server-side) is treated as billable.
+    //
+    // Committing unconditionally here would let an OpenAI rate-limit window
+    // burn a user's whole month in a handful of retries with no AI response.
+    if (response.status < 400 || response.status >= 500) {
+      onDispatch?.();
+    }
+
+    return response;
   } catch (error) {
+    // No response at all: the request may still have completed and been billed
+    // upstream, so commit. Over-counting is the safe way for a spend guard to
+    // be wrong.
+    onDispatch?.();
+
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error(`${operation} timed out. Please try again.`);
     }
@@ -51,7 +81,10 @@ export function getSpeechVoice() {
   return Deno.env.get('OPENAI_SPEECH_VOICE') ?? 'marin';
 }
 
-export async function createOpenAIResponse(payload: Record<string, unknown>) {
+export async function createOpenAIResponse(
+  payload: Record<string, unknown>,
+  onDispatch?: DispatchListener,
+) {
   const response = await fetchOpenAI(OPENAI_RESPONSES_URL, {
     method: 'POST',
     headers: {
@@ -59,7 +92,7 @@ export async function createOpenAIResponse(payload: Record<string, unknown>) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
-  }, 'OpenAI response');
+  }, 'OpenAI response', undefined, onDispatch);
 
   const body = await response.json();
 
@@ -118,11 +151,13 @@ export async function transcribeAudio({
   audioMimeType,
   fileName = 'recording.m4a',
   prompt,
+  onDispatch,
 }: {
   audioBase64: string;
   audioMimeType: string;
   fileName?: string;
   prompt?: string;
+  onDispatch?: DispatchListener;
 }) {
   const bytes = Uint8Array.from(atob(audioBase64), (char) =>
     char.charCodeAt(0),
@@ -143,7 +178,7 @@ export async function transcribeAudio({
       Authorization: `Bearer ${getOpenAIKey()}`,
     },
     body: formData,
-  }, 'OpenAI transcription');
+  }, 'OpenAI transcription', undefined, onDispatch);
 
   const body = await response.json();
 
@@ -175,10 +210,12 @@ export async function createSpeech({
   text,
   language,
   format = 'aac',
+  onDispatch,
 }: {
   text: string;
   language: string;
   format?: SpeechFormat;
+  onDispatch?: DispatchListener;
 }) {
   const model = getSpeechModel();
   const voice = getSpeechVoice();
@@ -197,7 +234,7 @@ export async function createSpeech({
         `Speak naturally as a warm native ${language} language teacher. ` +
         'Use an authentic accent, clear everyday pacing, natural rhythm, and no exaggerated announcer style.',
     }),
-  }, 'OpenAI speech', 45_000);
+  }, 'OpenAI speech', 45_000, onDispatch);
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
