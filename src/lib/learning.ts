@@ -242,6 +242,19 @@ export function cardStrength(
   return 'learning';
 }
 
+/**
+ * Share of a deck that has reached `strong`, for the mastery ring on each deck
+ * tile. `percent` is 0 for an empty deck rather than NaN.
+ */
+export function deckMastery(
+  cards: Array<Pick<ReviewableCard, 'known' | 'missed' | 'streak' | 'ease'>>,
+) {
+  const total = cards.length;
+  const strong = cards.filter((card) => cardStrength(card) === 'strong').length;
+
+  return { strong, total, percent: total ? strong / total : 0 };
+}
+
 function pickWeighted<T>(
   entries: Array<{ item: T; weight: number }>,
   random: () => number,

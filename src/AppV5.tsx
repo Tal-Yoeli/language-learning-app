@@ -72,6 +72,9 @@ import {
 import { useCloudSync } from './lib/useCloudSync';
 import AppShell, { type NavItem } from './ui/AppShell';
 import ConfirmDialog, { type ConfirmRequest } from './ui/ConfirmDialog';
+import GoalCelebration, { type GoalSummary } from './ui/GoalCelebration';
+import MasteryRing from './ui/MasteryRing';
+import PracticeCalendar from './ui/PracticeCalendar';
 import SyncChoiceDialog from './ui/SyncChoiceDialog';
 import { columnStyle, useResponsiveLayout } from './ui/useResponsiveLayout';
 import {
@@ -87,6 +90,7 @@ import {
   applyReviewResult,
   buildPracticeQueue,
   cardStrength,
+  deckMastery,
   DEFAULT_EASE,
   normalizeAnswer,
   initialEaseFor,
@@ -98,8 +102,11 @@ import {
 } from './lib/learning';
 import {
   applyActivityEvent,
+  buildPracticeCalendar,
+  countPractisedDays,
   createInitialActivity,
   DAILY_GOAL,
+  earnedMilestones,
   rollActivityToDate,
   type ActivityEvent,
   type ActivityState,
@@ -442,6 +449,13 @@ function hydrateActivity(value: unknown, today: string): ActivityState | null {
     todayProgress: Math.max(0, Number(parsed.todayProgress) || 0),
     lessonsCompleted: Math.max(0, Number(parsed.lessonsCompleted) || 0),
     perfectLessons: Math.max(0, Number(parsed.perfectLessons) || 0),
+    // Records saved before the practice calendar existed have no history.
+    // It starts empty and fills from today rather than being back-filled:
+    // inventing practice days would make the calendar a lie.
+    history:
+      parsed.history && typeof parsed.history === 'object'
+        ? (parsed.history as Record<string, number>)
+        : {},
   };
 }
 
@@ -483,6 +497,11 @@ export default function AppV5() {
   const [showLibraryManagement, setShowLibraryManagement] = useState(false);
   const [showCardSettings, setShowCardSettings] = useState(false);
   const [showAllCards, setShowAllCards] = useState(false);
+  const [showProgress, setShowProgress] = useState(false);
+  const [goalSummary, setGoalSummary] = useState<GoalSummary | null>(null);
+  // Which date's goal celebration has already been shown, so re-renders, deck
+  // changes and extra practice cannot retrigger it.
+  const celebratedDateRef = useRef('');
   const [cardSearch, setCardSearch] = useState('');
   const [expandedCardId, setExpandedCardId] = useState('');
   const [showLessonDeckPicker, setShowLessonDeckPicker] = useState(false);
@@ -614,6 +633,28 @@ export default function AppV5() {
         .some((field) => field.includes(query)),
     );
   }, [cards, cardSearch]);
+
+  const strongCardCount = useMemo(
+    () => cards.filter((card) => cardStrength(card) === 'strong').length,
+    [cards],
+  );
+  const practiceCalendar = useMemo(
+    () => buildPracticeCalendar(activity.history ?? {}, getLocalDateKey(), 12),
+    [activity.history],
+  );
+  const practisedDays = useMemo(
+    () => countPractisedDays(activity.history ?? {}),
+    [activity.history],
+  );
+  const milestones = useMemo(
+    () =>
+      earnedMilestones({
+        activity,
+        strongCards: strongCardCount,
+        daysPractised: practisedDays,
+      }),
+    [activity, strongCardCount, practisedDays],
+  );
 
   const weakCardCount = useMemo(
     () => cards.filter((card) => cardStrength(card) === 'needs-work').length,
@@ -815,6 +856,26 @@ export default function AppV5() {
       clearTimeout(settleTimer);
     };
   }, [screen, canUseAi, aiLoading]);
+
+  // The daily goal is the session's finish line. Fires once per day, keyed on
+  // the date rather than a boolean so a new day re-arms it automatically.
+  useEffect(() => {
+    if (!activityReady) return;
+
+    const today = getLocalDateKey();
+
+    if (activity.todayDate !== today) return;
+    if (activity.todayProgress < DAILY_GOAL) return;
+    if (celebratedDateRef.current === today) return;
+
+    celebratedDateRef.current = today;
+    setGoalSummary({
+      cardsPractised: activity.todayProgress,
+      xpEarned: activity.todayXp,
+      streakDays: activity.streakDays,
+    });
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  }, [activityReady, activity]);
 
   useEffect(() => {
     lessonEvaluationIdRef.current += 1;
@@ -2371,8 +2432,17 @@ export default function AppV5() {
                   deck.id === library.selectedDeckId && styles.deckTileActive,
                 ]}
               >
-                <Text style={styles.deckName}>{deck.name}</Text>
-                <Text style={styles.deckCount}>{deck.cards.length} cards</Text>
+                <View style={styles.deckTileRow}>
+                  <View style={styles.deckTileCopy}>
+                    <Text style={styles.deckName}>{deck.name}</Text>
+                    <Text style={styles.deckCount}>
+                      {deck.cards.length} cards
+                    </Text>
+                  </View>
+                  {deck.cards.length ? (
+                    <MasteryRing percent={deckMastery(deck.cards).percent} />
+                  ) : null}
+                </View>
               </Pressable>
             ))}
           </View>
@@ -2462,6 +2532,52 @@ export default function AppV5() {
             </Text>
           ) : null}
         </View>
+          </View>
+        ) : null}
+
+        <DisclosureRow
+          expanded={showProgress}
+          icon={Flame}
+          onPress={() => setShowProgress((current) => !current)}
+          subtitle={`${practisedDays} day${practisedDays === 1 ? '' : 's'} practised · ${milestones.filter((m) => m.earned).length}/${milestones.length} milestones`}
+          title="Your progress"
+        />
+
+        {showProgress ? (
+          <View style={styles.panel}>
+            <PracticeCalendar weeks={practiceCalendar} />
+
+            <Text style={styles.sectionLabel}>Milestones</Text>
+            <View style={styles.milestoneGrid}>
+              {milestones.map((milestone) => (
+                <View
+                  key={milestone.id}
+                  style={[
+                    styles.milestone,
+                    milestone.earned && styles.milestoneEarned,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.milestoneLabel,
+                      milestone.earned && styles.milestoneLabelEarned,
+                    ]}
+                  >
+                    {milestone.label}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.milestoneDetail,
+                      milestone.earned && styles.milestoneDetailEarned,
+                    ]}
+                  >
+                    {milestone.earned
+                      ? 'Earned'
+                      : `${Math.min(milestone.progress, milestone.target)}/${milestone.target} · ${milestone.requirement}`}
+                  </Text>
+                </View>
+              ))}
+            </View>
           </View>
         ) : null}
 
@@ -3697,6 +3813,10 @@ export default function AppV5() {
         request={confirmRequest}
       />
       <SyncChoiceDialog request={syncChoice} />
+      <GoalCelebration
+        onDismiss={() => setGoalSummary(null)}
+        summary={goalSummary}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -4199,6 +4319,28 @@ const styles = StyleSheet.create({
   statValue: { color: '#17212B', fontSize: 21, fontWeight: '900' },
   statLabel: { color: '#52606D', fontSize: 12, fontWeight: '700' },
   contextText: { color: '#52606D', fontSize: 13, fontWeight: '700' },
+  deckTileRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  deckTileCopy: { flex: 1, gap: 4 },
+  milestoneGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 },
+  milestone: {
+    width: '48%',
+    borderColor: '#E4DED4',
+    borderRadius: 8,
+    borderWidth: 1,
+    backgroundColor: '#FBFAF7',
+    padding: 11,
+    gap: 3,
+  },
+  milestoneEarned: { borderColor: '#24706A', backgroundColor: '#DFF1EC' },
+  milestoneLabel: { color: '#79838C', fontSize: 14, fontWeight: '800' },
+  milestoneLabelEarned: { color: '#17212B' },
+  milestoneDetail: { color: '#99A1A8', fontSize: 11, lineHeight: 15 },
+  milestoneDetailEarned: { color: '#1F5E59', fontWeight: '800' },
   browseCard: {
     borderColor: '#E4DED4',
     borderRadius: 8,
