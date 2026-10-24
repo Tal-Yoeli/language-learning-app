@@ -88,6 +88,7 @@ import {
   buildPracticeQueue,
   cardStrength,
   DEFAULT_EASE,
+  normalizeAnswer,
   initialEaseFor,
   isDue,
   isLocallyAcceptableAnswer,
@@ -481,6 +482,9 @@ export default function AppV5() {
   );
   const [showLibraryManagement, setShowLibraryManagement] = useState(false);
   const [showCardSettings, setShowCardSettings] = useState(false);
+  const [showAllCards, setShowAllCards] = useState(false);
+  const [cardSearch, setCardSearch] = useState('');
+  const [expandedCardId, setExpandedCardId] = useState('');
   const [showLessonDeckPicker, setShowLessonDeckPicker] = useState(false);
   const [showAddDestination, setShowAddDestination] = useState(false);
   const [showAddDetails, setShowAddDetails] = useState(false);
@@ -596,6 +600,21 @@ export default function AppV5() {
       ),
     [cards],
   );
+  // Deck browser contents. Matching reuses normalizeAnswer so searching works
+  // the same way answer checking does -- accents, diacritics and punctuation
+  // are ignored, which matters for Greek, Arabic and Hebrew.
+  const browsedCards = useMemo(() => {
+    const query = normalizeAnswer(cardSearch);
+
+    if (!query) return cards;
+
+    return cards.filter((card) =>
+      [card.term, card.translation, card.example, card.exampleTranslation]
+        .map(normalizeAnswer)
+        .some((field) => field.includes(query)),
+    );
+  }, [cards, cardSearch]);
+
   const weakCardCount = useMemo(
     () => cards.filter((card) => cardStrength(card) === 'needs-work').length,
     [cards],
@@ -1604,13 +1623,19 @@ export default function AppV5() {
     );
   }
 
+  /** Loads a card into the shared edit form. Used by both the review card and
+   *  the deck browser, so a typo can be fixed from wherever it is noticed. */
+  function beginEditingCard(card: Flashcard) {
+    setEditingCardId(card.id);
+    setEditTerm(card.term);
+    setEditTranslation(card.translation);
+    setEditExample(card.example);
+    setEditExampleTranslation(card.exampleTranslation);
+  }
+
   function beginEditingActiveCard() {
     if (!activeCard) return;
-    setEditingCardId(activeCard.id);
-    setEditTerm(activeCard.term);
-    setEditTranslation(activeCard.translation);
-    setEditExample(activeCard.example);
-    setEditExampleTranslation(activeCard.exampleTranslation);
+    beginEditingCard(activeCard);
   }
 
   function saveCardEdits() {
@@ -1641,25 +1666,32 @@ export default function AppV5() {
     setEditingCardId('');
   }
 
-  function deleteActiveCard() {
-    if (!activeCard) return;
+  function deleteCard(target: Flashcard) {
     setConfirmRequest({
       title: 'Delete card?',
-      message: activeCard.term,
+      message: target.term,
       confirmLabel: 'Delete',
       destructive: true,
       onConfirm: () => {
         updateSelectedDeck(
           (deck) => ({
             ...deck,
-            cards: deck.cards.filter((card) => card.id !== activeCard.id),
+            cards: deck.cards.filter((card) => card.id !== target.id),
           }),
           'Card deleted.',
         );
         setEditingCardId('');
+        // The practice round still holds the deleted id; clearing it rebuilds
+        // a fresh round rather than leaving a gap mid-session.
+        setPractice((current) => ({ ...current, ids: [] }));
         setCardIndex(0);
       },
     });
+  }
+
+  function deleteActiveCard() {
+    if (!activeCard) return;
+    deleteCard(activeCard);
   }
 
   function previewGeneratedCards(generatedCards: GeneratedFlashcard[]) {
@@ -2430,6 +2462,153 @@ export default function AppV5() {
             </Text>
           ) : null}
         </View>
+          </View>
+        ) : null}
+
+        <DisclosureRow
+          expanded={showAllCards}
+          icon={Library}
+          onPress={() => setShowAllCards((current) => !current)}
+          subtitle={`${cards.length} card${cards.length === 1 ? '' : 's'} in ${selectedDeck?.name ?? 'this deck'}`}
+          title="All cards"
+        />
+
+        {showAllCards ? (
+          <View style={styles.panel}>
+            {cards.length > 8 ? (
+              <TextInput
+                accessibilityLabel="Search cards"
+                autoCapitalize="none"
+                onChangeText={setCardSearch}
+                placeholder="Search this deck"
+                placeholderTextColor="#79838C"
+                style={styles.input}
+                value={cardSearch}
+              />
+            ) : null}
+
+            {!cards.length ? (
+              <Text style={styles.panelText}>
+                This deck has no cards yet. Add them by hand or with AI.
+              </Text>
+            ) : !browsedCards.length ? (
+              <Text style={styles.panelText}>
+                Nothing matches &ldquo;{cardSearch.trim()}&rdquo;.
+              </Text>
+            ) : (
+              <>
+                {cardSearch.trim() ? (
+                  <Text style={styles.contextText}>
+                    {browsedCards.length} of {cards.length} cards
+                  </Text>
+                ) : null}
+
+                {browsedCards.map((card) => {
+                  const expanded = expandedCardId === card.id;
+                  const editing = editingCardId === card.id;
+
+                  return (
+                    <View key={card.id} style={styles.browseCard}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityState={{ expanded }}
+                        onPress={() => {
+                          setExpandedCardId(expanded ? '' : card.id);
+                          // Collapsing while editing would strand the form.
+                          if (expanded && editing) setEditingCardId('');
+                        }}
+                        style={({ pressed }) => [
+                          styles.browseCardHeader,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View style={styles.browseCardCopy}>
+                          <Text style={styles.browseCardTerm}>{card.term}</Text>
+                          <Text numberOfLines={1} style={styles.browseCardTranslation}>
+                            {card.translation}
+                          </Text>
+                        </View>
+                        <StrengthBadge strength={cardStrength(card)} />
+                      </Pressable>
+
+                      {expanded && !editing ? (
+                        <View style={styles.browseCardBody}>
+                          {card.example ? (
+                            <Text style={styles.browseCardExample}>
+                              {card.example}
+                            </Text>
+                          ) : null}
+                          {card.exampleTranslation ? (
+                            <Text style={styles.browseCardExampleTranslation}>
+                              {card.exampleTranslation}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.contextText}>
+                            Seen {card.known + card.missed} time
+                            {card.known + card.missed === 1 ? '' : 's'} ·{' '}
+                            next review in {card.intervalDays || 0} day
+                            {(card.intervalDays || 0) === 1 ? '' : 's'}
+                          </Text>
+                          <View style={styles.actionRow}>
+                            <ActionButton
+                              label="Edit"
+                              onPress={() => beginEditingCard(card)}
+                            />
+                            <ActionButton
+                              kind="danger"
+                              label="Delete"
+                              onPress={() => deleteCard(card)}
+                            />
+                          </View>
+                        </View>
+                      ) : null}
+
+                      {expanded && editing ? (
+                        <View style={styles.browseCardBody}>
+                          <Field
+                            label="Word or phrase"
+                            onChangeText={setEditTerm}
+                            placeholder="Term"
+                            value={editTerm}
+                          />
+                          <Field
+                            label="Translation"
+                            onChangeText={setEditTranslation}
+                            placeholder="Translation"
+                            value={editTranslation}
+                          />
+                          <Field
+                            label="Practice sentence"
+                            multiline
+                            onChangeText={setEditExample}
+                            placeholder="Practice sentence"
+                            value={editExample}
+                          />
+                          <Field
+                            label="Sentence translation"
+                            multiline
+                            onChangeText={setEditExampleTranslation}
+                            placeholder={`Full sentence in ${library.motherTongue}`}
+                            value={editExampleTranslation}
+                          />
+                          <View style={styles.actionRow}>
+                            <ActionButton
+                              kind="primary"
+                              label="Save changes"
+                              onPress={saveCardEdits}
+                            />
+                            <ActionButton
+                              label="Cancel"
+                              onPress={() => setEditingCardId('')}
+                            />
+                          </View>
+                        </View>
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </>
+            )}
           </View>
         ) : null}
 
@@ -4020,6 +4199,37 @@ const styles = StyleSheet.create({
   statValue: { color: '#17212B', fontSize: 21, fontWeight: '900' },
   statLabel: { color: '#52606D', fontSize: 12, fontWeight: '700' },
   contextText: { color: '#52606D', fontSize: 13, fontWeight: '700' },
+  browseCard: {
+    borderColor: '#E4DED4',
+    borderRadius: 8,
+    borderWidth: 1,
+    backgroundColor: '#FBFAF7',
+    overflow: 'hidden',
+  },
+  browseCardHeader: {
+    minHeight: 54,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  browseCardCopy: { flex: 1, gap: 2 },
+  browseCardTerm: { color: '#17212B', fontSize: 16, fontWeight: '800' },
+  browseCardTranslation: { color: '#52606D', fontSize: 13 },
+  browseCardBody: {
+    borderTopColor: '#E4DED4',
+    borderTopWidth: 1,
+    padding: 12,
+    gap: 10,
+  },
+  browseCardExample: { color: '#17212B', fontSize: 14, lineHeight: 20 },
+  browseCardExampleTranslation: {
+    color: '#52606D',
+    fontSize: 13,
+    lineHeight: 19,
+  },
   reviewHeading: {
     alignItems: 'flex-end',
     flexDirection: 'row',
@@ -4062,8 +4272,11 @@ const styles = StyleSheet.create({
   },
   strengthBadge: {
     borderRadius: 6,
-    backgroundColor: 'rgba(255, 255, 255, 0.14)',
-    color: '#E6EFEC',
+    // Solid, not translucent: the badge sits on the dark review card AND on the
+    // light deck-browser rows, and a translucent fill vanished on the latter.
+    // Every variant below pairs a dark fill with light text so both work.
+    backgroundColor: '#4A5560',
+    color: '#EDF1F3',
     fontSize: 11,
     fontWeight: '900',
     overflow: 'hidden',
