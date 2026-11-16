@@ -183,6 +183,7 @@ type LibraryState = {
 
 const LIBRARY_STORAGE_KEY = 'language-learning/library/v5';
 const ACTIVITY_STORAGE_KEY = 'language-learning/activity/v1';
+const REVIEW_DIRECTION_STORAGE_KEY = 'language-learning/review-direction/v1';
 const V4_LIBRARY_STORAGE_KEY = 'language-learning/library/v4';
 const V3_LIBRARY_STORAGE_KEY = 'language-learning/library/v3';
 const V2_LIBRARY_STORAGE_KEY = 'language-learning/library/v2';
@@ -519,6 +520,12 @@ export default function AppV5() {
     ids: [],
   });
   const [showTranslation, setShowTranslation] = useState(false);
+  // Which side of a card Quick review shows first: the learning-language term
+  // ('to-native', recognition) or the mother-tongue translation ('to-learning',
+  // recall). A per-device preference, so it lives outside the synced library.
+  const [reviewDirection, setReviewDirection] = useState<
+    'to-native' | 'to-learning'
+  >('to-native');
   const [newLanguageName, setNewLanguageName] = useState('');
   const [newDeckName, setNewDeckName] = useState('');
   const [deckGoal, setDeckGoal] = useState('');
@@ -674,6 +681,11 @@ export default function AppV5() {
     [practice, selectedDeck?.id, cards],
   );
   const activeCard = reviewCards[cardIndex] ?? null;
+  const reverseReview = reviewDirection === 'to-learning';
+  const learningLanguageName = selectedLanguage?.name ?? 'Learning language';
+  const answerNoun = reverseReview ? 'answer' : 'translation';
+  // In reverse review the audio speaks the answer, so it waits for the reveal.
+  const answerHidden = reverseReview && !showTranslation;
   const canUseAi = Boolean(supabase);
   const practicePhrases = useMemo(
     () =>
@@ -746,6 +758,14 @@ export default function AppV5() {
       (error) => setNotice(`Local save error: ${error.message}`),
     );
   }, [library, storageReady]);
+
+  useEffect(() => {
+    AsyncStorage.getItem(REVIEW_DIRECTION_STORAGE_KEY)
+      .then((stored) => {
+        if (stored === 'to-learning') setReviewDirection('to-learning');
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!activityReady) return;
@@ -1044,6 +1064,17 @@ export default function AppV5() {
   function toggleCardTranslation() {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setShowTranslation((current) => !current);
+  }
+
+  function changeReviewDirection(direction: 'to-native' | 'to-learning') {
+    if (direction === reviewDirection) return;
+    void Haptics.selectionAsync();
+    setReviewDirection(direction);
+    // The answer side of the current card would otherwise stay on screen.
+    setShowTranslation(false);
+    AsyncStorage.setItem(REVIEW_DIRECTION_STORAGE_KEY, direction).catch(
+      () => {},
+    );
   }
 
   function selectLanguage(languageId: string) {
@@ -2746,6 +2777,24 @@ export default function AppV5() {
             {weakCardCount ? ` · ${weakCardCount} need work` : ''}
           </Text>
         </View>
+        {cards.length ? (
+          <View
+            accessibilityLabel="Review direction"
+            accessibilityRole="radiogroup"
+            style={styles.segmentedControl}
+          >
+            <ChoiceChip
+              active={!reverseReview}
+              label={`${learningLanguageName} → ${library.motherTongue}`}
+              onPress={() => changeReviewDirection('to-native')}
+            />
+            <ChoiceChip
+              active={reverseReview}
+              label={`${library.motherTongue} → ${learningLanguageName}`}
+              onPress={() => changeReviewDirection('to-learning')}
+            />
+          </View>
+        ) : null}
         {!dueCards.length && cards.length ? (
           <View style={styles.caughtUpBox}>
             <Text style={styles.caughtUpTitle}>You are caught up</Text>
@@ -2761,10 +2810,12 @@ export default function AppV5() {
             <Pressable
               accessibilityHint={
                 showTranslation
-                  ? 'Hides the translation and example'
-                  : 'Shows the translation and example'
+                  ? `Hides the ${answerNoun} and example`
+                  : `Shows the ${answerNoun} and example`
               }
-              accessibilityLabel={`${activeCard.term}. ${showTranslation ? 'Translation shown' : 'Translation hidden'}`}
+              accessibilityLabel={`${
+                reverseReview ? activeCard.translation : activeCard.term
+              }. ${showTranslation ? 'Answer shown' : 'Answer hidden'}`}
               accessibilityRole="button"
               accessibilityState={{ expanded: showTranslation }}
               onPress={toggleCardTranslation}
@@ -2777,14 +2828,16 @@ export default function AppV5() {
                 </Text>
                 <StrengthBadge strength={cardStrength(activeCard)} />
               </View>
-              <Text style={styles.cardTerm}>{activeCard.term}</Text>
+              <Text style={styles.cardTerm}>
+                {reverseReview ? activeCard.translation : activeCard.term}
+              </Text>
               <Text style={styles.cardHint}>
-                {showTranslation ? 'Hide translation' : 'Show translation'}
+                {showTranslation ? `Hide ${answerNoun}` : `Show ${answerNoun}`}
               </Text>
               {showTranslation ? (
                 <View style={styles.translationBlock}>
                   <Text style={styles.translationText}>
-                    {activeCard.translation}
+                    {reverseReview ? activeCard.term : activeCard.translation}
                   </Text>
                   <Text style={styles.exampleText}>{activeCard.example}</Text>
                   {activeCard.exampleTranslation ? (
@@ -2797,14 +2850,16 @@ export default function AppV5() {
             </Pressable>
             <View style={styles.actionRow}>
               <ActionButton
-                disabled={Boolean(speechLoadingText)}
+                disabled={Boolean(speechLoadingText) || answerHidden}
                 icon={Volume2}
                 label="Hear word"
                 onPress={() => playSentence(activeCard.term)}
               />
               <ActionButton
                 disabled={
-                  !activeCard.example.trim() || Boolean(speechLoadingText)
+                  !activeCard.example.trim() ||
+                  Boolean(speechLoadingText) ||
+                  answerHidden
                 }
                 label={
                   speechLoadingText === activeCard.example
